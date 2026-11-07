@@ -1,0 +1,388 @@
+# -*- coding: utf-8 -*-
+"""
+开盘前多因子荐股页面
+====================
+两个固定批次（均为开盘前，给足反应时间）：
+  · 早盘批：工作日 9:27 自动生成（9:30 开盘前）
+  · 午盘批：工作日 12:57 自动生成（13:00 下午开盘前）
+支持手动生成；结果按批次本地留档，重启后可查看。
+
+界面展示每只标的的因子构成（趋势/量价/流动性/轮动/龙头/题材/资金/风险），
+选中后显示完整打分说明与命中理由；支持导出 CSV。
+"""
+import datetime as dt
+import json
+import os
+from typing import Callable, Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                               QLabel, QFrame, QSplitter, QTextBrowser,
+                               QProgressBar, QFileDialog)
+
+from ui_common import (UP, DOWN, FLAT, WARN, TEXT2, Worker, make_table, cell,
+                       pct_color, skeleton_table, export_table_csv)
+import market_info
+import recommender
+
+BATCHES = [("morning", "早盘批 · 9:27"), ("noon", "午盘批 · 12:57")]
+
+FACTOR_KEYS = ["trend", "volume", "liquidity", "rotation",
+               "leader", "theme", "capital", "risk"]
+FACTOR_LABEL = {
+    "trend": "趋势", "volume": "量价", "liquidity": "流动",
+    "rotation": "轮动", "leader": "龙头", "theme": "题材",
+    "capital": "资金", "risk": "风险",
+}
+
+
+class RecommendPage(QWidget):
+    def __init__(self, set_status: Callable[[str], None],
+                 snapshot_provider: Callable[[], Optional[object]],
+                 on_snapshot: Callable[[object], None]):
+        super().__init__()
+        self.set_status = set_status
+        self.provider = snapshot_provider
+        self.on_snapshot = on_snapshot
+        self.batch = "morning"
+        self.results = {"morning": None, "noon": None}
+        self._workers = []
+        self._busy = False
+        self._row_picks = {}
+        self._build()
+        self._load_cached()
+
+    # ---------------- 缓存 ----------------
+    def _cache_path(self, slot: str) -> str:
+        return os.path.join(
+            market_info.CACHE_DIR,
+            f"picks_{slot}_{dt.date.today():%Y%m%d}.json")
+
+    def _load_cached(self):
+        for slot, _ in BATCHES:
+            p = self._cache_path(slot)
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        self.results[slot] = json.load(f)
+                except Exception:
+                    self.results[slot] = None
+        self._render()
+
+    def _save_cached(self, slot: str, res: dict):
+        tmp = self._cache_path(slot) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False)
+        os.replace(tmp, self._cache_path(slot))
+
+    # ---------------- UI ----------------
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
+
+        bar = QFrame()
+        bar.setObjectName("Card")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(16, 10, 16, 10)
+        bl.setSpacing(10)
+
+        self.batch_btns = {}
+        for slot, label in BATCHES:
+            b = QPushButton(label)
+            b.setObjectName("Tab")
+            b.setCheckable(True)
+            b.clicked.connect(lambda checked=False, s=slot: self._switch_batch(s))
+            self.batch_btns[slot] = b
+            bl.addWidget(b)
+        bl.addSpacing(8)
+        self.btn = QPushButton("生成多因子荐股")
+        self.btn.setObjectName("Primary")
+        self.btn.clicked.connect(self.generate)
+        bl.addWidget(self.btn)
+        self.export_btn = QPushButton("导出 CSV")
+        self.export_btn.clicked.connect(self._export)
+        bl.addWidget(self.export_btn)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setFixedWidth(140)
+        self.progress.setVisible(False)
+        bl.addWidget(self.progress)
+        bl.addStretch()
+        self.degraded_lbl = QLabel("")
+        self.degraded_lbl.setStyleSheet(f"color:{WARN}; font-size:12px;")
+        bl.addWidget(self.degraded_lbl)
+        self.date_lbl = QLabel("")
+        self.date_lbl.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
+        bl.addWidget(self.date_lbl)
+        root.addWidget(bar)
+
+        self.note_lbl = QLabel("开盘前 T-3 分钟生成；非交易时段使用最近收盘数据并自动降级")
+        self.note_lbl.setObjectName("Hint")
+        root.addWidget(self.note_lbl)
+
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+        headers = ["排名", "代码", "名称", "行业", "现价", "涨幅%", "综合分"] + \
+                  [FACTOR_LABEL[k] for k in FACTOR_KEYS] + ["命中概念"]
+        self.pick_tbl = make_table(headers)
+        self.pick_tbl.setColumnWidth(0, 46)
+        self.pick_tbl.setColumnWidth(1, 68)
+        self.pick_tbl.setColumnWidth(2, 88)
+        self.pick_tbl.setColumnWidth(3, 88)
+        for i in range(4, 7):
+            self.pick_tbl.setColumnWidth(i, 62)
+        for i in range(7, 7 + len(FACTOR_KEYS)):
+            self.pick_tbl.setColumnWidth(i, 52)
+        self.pick_tbl.setColumnWidth(15, 200)
+        self.pick_tbl.itemSelectionChanged.connect(self._show_pick_reason)
+        split.addWidget(self.pick_tbl)
+
+        self.ladder_tbl = make_table(
+            ["代码", "名称", "连板", "封单(亿)", "炸板", "涨停原因"])
+        self.ladder_tbl.setColumnWidth(0, 68)
+        self.ladder_tbl.setColumnWidth(1, 92)
+        self.ladder_tbl.setColumnWidth(2, 50)
+        self.ladder_tbl.setColumnWidth(5, 180)
+        split.addWidget(self.ladder_tbl)
+        split.setSizes([880, 380])
+        root.addWidget(split, stretch=3)
+
+        reason_card = QFrame()
+        reason_card.setObjectName("Card")
+        rl = QVBoxLayout(reason_card)
+        rl.setContentsMargins(14, 10, 14, 12)
+        cap = QLabel("因子构成与推荐理由")
+        cap.setObjectName("CardTitle")
+        rl.addWidget(cap)
+        self.reason_box = QTextBrowser()
+        self.reason_box.setMinimumHeight(120)
+        self.reason_box.setMaximumHeight(210)
+        self.reason_box.setOpenExternalLinks(True)
+        rl.addWidget(self.reason_box)
+        root.addWidget(reason_card, stretch=1)
+
+        skeleton_table(self.pick_tbl, 8, "等待生成多因子名单…")
+        skeleton_table(self.ladder_tbl, 6, "等待涨停梯队…")
+
+    def _switch_batch(self, slot: str):
+        self.batch = slot
+        self._render()
+
+    # ---------------- 生成 ----------------
+    def generate(self):
+        self._run(self.batch, manual=True)
+
+    def auto_generate(self, slot: str):
+        """定时任务入口：切到对应批次并自动生成。"""
+        self.batch = slot
+        self._run(slot, manual=False)
+
+    def _run(self, slot: str, manual: bool):
+        if self._busy:
+            return
+        self._busy = True
+        self.btn.setEnabled(False)
+        self.progress.setVisible(True)
+        kind = "手动" if manual else "自动"
+        self.set_status(f"正在{kind}生成{dict(BATCHES)[slot]}多因子荐股…")
+        skeleton_table(self.pick_tbl, 8, "正在多因子打分…")
+
+        def task(p):
+            snap = self.provider()
+            if snap is None:
+                p("信息尚未加载，先抓取最新消息…")
+                snap = market_info.refresh_all(progress=p)
+                self.on_snapshot(snap)
+            p("正在结合当日信息与题材打分（趋势/量价/轮动/龙头/题材/风险）…")
+            res = recommender.recommend(snap, progress=p)
+            res["slot"] = slot
+            res["manual"] = manual
+            res["generated_at"] = dt.datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S")
+            return res
+
+        w = Worker(task)
+        w.progress.connect(self.set_status)
+        w.done.connect(self._on_done)
+        w.error.connect(self._on_error)
+        w.finished.connect(self._on_finished)
+        self._workers.append(w)
+        w.start()
+
+    def _on_finished(self):
+        self._busy = False
+        self.btn.setEnabled(True)
+        self.progress.setVisible(False)
+        self._workers = [x for x in self._workers if x.isRunning()]
+
+    def _on_error(self, msg):
+        self.set_status("荐股失败：" + msg)
+        self._on_finished()
+
+    def _on_done(self, res):
+        slot = res.get("slot", self.batch)
+        self.results[slot] = res
+        self.batch = slot
+        self._save_cached(slot, res)
+        self._render()
+        self.set_status(
+            f"{dict(BATCHES)[slot]}完成：推荐 {len(res.get('picks', []))} 只，"
+            f"涨停梯队 {len(res.get('ladder', []))} 只，"
+            f"耗时 {res.get('elapsed', 0)}s")
+
+    # ---------------- 渲染 ----------------
+    def _render(self):
+        for slot, b in self.batch_btns.items():
+            b.setChecked(slot == self.batch)
+        res = self.results[self.batch]
+        self._row_picks = {}
+        if res is None:
+            self.date_lbl.setText("本批次尚未生成")
+            self.degraded_lbl.setText("")
+            self.note_lbl.setText(
+                "开盘前 T-3 分钟生成；非交易时段使用最近收盘数据并自动降级")
+            self.reason_box.clear()
+            skeleton_table(self.pick_tbl, 8, "点击“生成多因子荐股”开始")
+            skeleton_table(self.ladder_tbl, 6, "等待涨停梯队…")
+            return
+
+        tag = "手动" if res.get("manual") else "自动"
+        self.date_lbl.setText(
+            f"[{tag}] 交易日 {res.get('trade_date', '')} · "
+            f"生成于 {res.get('generated_at', res.get('asof', ''))}")
+        self.degraded_lbl.setText(
+            "⚠ 数据降级" if res.get("degraded") else "")
+        notes = res.get("data_notes") or []
+        extra = (f" · 全市场 {res.get('universe', 0)} 只 / "
+                 f"候选 {res.get('candidates', 0)} 只")
+        self.note_lbl.setText(("；".join(notes) if notes else
+                               "数据完整：行情 + 日线 + 板块轮动 + 题材") + extra)
+
+        self.pick_tbl.setSortingEnabled(False)
+        self.pick_tbl.setRowCount(0)
+        for p in res.get("picks", []):
+            r = self.pick_tbl.rowCount()
+            self.pick_tbl.insertRow(r)
+            self._row_picks[r] = p
+            self.pick_tbl.setItem(r, 0, cell(
+                p.get("rank", r + 1), UP, bold=True, align=Qt.AlignCenter,
+                sort_value=p.get("rank", r + 1)))
+            c0 = self.pick_tbl.item(r, 0)
+            c0.setData(Qt.UserRole, p)
+            self.pick_tbl.setItem(r, 1, cell(
+                p.get("code", ""), align=Qt.AlignCenter))
+            self.pick_tbl.setItem(r, 2, cell(p.get("name", ""), bold=True))
+            self.pick_tbl.setItem(r, 3, cell(p.get("industry", ""), TEXT2))
+            self.pick_tbl.setItem(r, 4, cell(
+                f"{p.get('price', 0):.2f}", align=Qt.AlignCenter,
+                sort_value=p.get("price", 0)))
+            self.pick_tbl.setItem(r, 5, cell(
+                f"{p.get('change_pct', 0):+.2f}",
+                pct_color(p.get("change_pct", 0)), align=Qt.AlignCenter,
+                sort_value=p.get("change_pct", 0)))
+            score = float(p.get("score", 0))
+            sc_color = UP if score >= 65 else (WARN if score >= 50 else TEXT2)
+            self.pick_tbl.setItem(r, 6, cell(
+                f"{score:.1f}", sc_color, bold=True, align=Qt.AlignCenter,
+                sort_value=score))
+
+            fs = p.get("factor_scores") or {}
+            for j, key in enumerate(FACTOR_KEYS):
+                v = float(fs.get(key, 0) or 0)
+                meta = recommender.FACTOR_META.get(key, {})
+                mx = meta.get("max", 1)
+                ratio = v / mx if mx else 0
+                col = UP if ratio >= 0.7 else (WARN if ratio >= 0.4 else TEXT2)
+                self.pick_tbl.setItem(r, 7 + j, cell(
+                    f"{v:.0f}", col, align=Qt.AlignCenter, sort_value=v))
+            self.pick_tbl.setItem(
+                r, 7 + len(FACTOR_KEYS),
+                cell("、".join(p.get("hit_concepts", [])[:5])))
+
+        self.ladder_tbl.setRowCount(0)
+        for s in res.get("ladder", []):
+            r = self.ladder_tbl.rowCount()
+            self.ladder_tbl.insertRow(r)
+            self.ladder_tbl.setItem(r, 0, cell(
+                s.get("code", ""), align=Qt.AlignCenter))
+            self.ladder_tbl.setItem(r, 1, cell(s.get("name", ""), bold=True))
+            self.ladder_tbl.setItem(r, 2, cell(
+                s.get("boards", 0), UP, bold=True, align=Qt.AlignCenter,
+                sort_value=s.get("boards", 0)))
+            self.ladder_tbl.setItem(r, 3, cell(
+                f"{s.get('seal_fund', 0):.2f}", align=Qt.AlignCenter,
+                sort_value=s.get("seal_fund", 0)))
+            self.ladder_tbl.setItem(r, 4, cell(
+                s.get("break_count", 0), align=Qt.AlignCenter,
+                sort_value=s.get("break_count", 0)))
+            self.ladder_tbl.setItem(
+                r, 5, cell("、".join(s.get("reasons", []))))
+
+        self.pick_tbl.setSortingEnabled(True)
+        self.ladder_tbl.setSortingEnabled(True)
+        if res.get("picks"):
+            self.pick_tbl.selectRow(0)
+
+    def _show_pick_reason(self):
+        rows = self.pick_tbl.selectionModel().selectedRows()
+        if not rows:
+            return
+        item = self.pick_tbl.item(rows[0].row(), 0)
+        p = item.data(Qt.UserRole) if item else None
+        if not p:
+            return
+        name = p.get("name", "")
+        html = (f"<b style='color:{UP}'>#{p.get('rank', '')} "
+                f"{p.get('code', '')} {name}</b> "
+                f"<span style='color:{TEXT2}'>{p.get('industry', '')} · "
+                f"{p.get('market', '')}</span><br>")
+        html += f"<b>综合分 {float(p.get('score', 0)):.1f} / 100</b>"
+        if p.get("leader_flag"):
+            html += f" · <b>{p['leader_flag']}</b>"
+        html += (f" · 风险等级 <span style='color:"
+                 f"{UP if p.get('risk') == '高' else TEXT2}'>{p.get('risk', '')}"
+                 f"</span><br>")
+
+        # 因子条
+        fs = p.get("factors") or {}
+        html += "<table cellspacing='4' cellpadding='2'>"
+        for key in FACTOR_KEYS:
+            item = fs.get(key) or {}
+            meta = recommender.FACTOR_META.get(key, {})
+            sc = float(item.get("score", 0) or 0)
+            mx = float(item.get("max", meta.get("max", 1)) or 1)
+            ratio = sc / mx if mx else 0
+            color = UP if ratio >= 0.7 else (WARN if ratio >= 0.4 else TEXT2)
+            bar = "█" * int(ratio * 10)
+            html += (f"<tr><td align='right'><b>{meta.get('name', key)}</b></td>"
+                     f"<td align='right'>{sc:.0f}/{mx:.0f}</td>"
+                     f"<td style='color:{color}'>{bar}</td>"
+                     f"<td>{item.get('note', '')}</td></tr>")
+        html += "</table>"
+        if p.get("data_quality") == "降级":
+            html += (f"<span style='color:{WARN}'>数据降级：日线不可用，"
+                     f"因子按行情快照估算</span><br>")
+        html += "<br>"
+        for rr in p.get("reasons", []):
+            html += f"• {rr}<br>"
+        self.reason_box.setHtml(html)
+
+    # ---------------- 导出 ----------------
+    def _export(self):
+        res = self.results.get(self.batch)
+        if not res or not res.get("picks"):
+            self.set_status("当前批次暂无结果可导出")
+            return
+        default = os.path.join(
+            os.path.expanduser("~"), "Desktop",
+            f"多因子荐股_{self.batch}_{dt.date.today():%Y%m%d}.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出荐股结果", default, "CSV 文件 (*.csv)")
+        if not path:
+            return
+        try:
+            n = export_table_csv(self.pick_tbl, path)
+            self.set_status(f"已导出 {n} 条到 {path}")
+        except Exception as e:  # noqa
+            self.set_status(f"导出失败：{e}")

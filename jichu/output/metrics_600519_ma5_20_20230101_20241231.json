@@ -1,0 +1,18 @@
+{
+  "total_return": -0.3953648217980882,
+  "annual_return": -0.23045839166963966,
+  "max_drawdown": -0.4069176217980882,
+  "sharpe": -2.1341950661238607,
+  "win_rate": 0.1875,
+  "profit_factor": 0.07826646194271446,
+  "avg_trade_return_pct": -3.2475000000000005,
+  "closed_trades": 16,
+  "open_trades": 1,
+  "symbol": "600519",
+  "start": "20230101",
+  "end": "20241231",
+  "fast": 5,
+  "slow": 20,
+  "init_cash": 1000000,
+  "benchmark_return": -0.0685098029605572
+}
