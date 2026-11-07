@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# IDE / 编辑器
+.idea/
+.vscode/
+
+# 运行时缓存与行情缓存（不入库）
+.cache/
+*.log
+
+# Dpseek 原始数据与生成图表（体积大，按需本地保留）
+Dpseek/data/
+Dpseek/charts/
+
+# 系统文件
+.DS_Store
+Thumbs.db
