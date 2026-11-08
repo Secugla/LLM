@@ -9,18 +9,22 @@
   · 信号缓存 .cache/watch_signals.json：启动先显示上次信号，再后台重算覆盖
 即使网络失败，自选代码与名称也一定显示。
 """
+import datetime as dt
 import json
 import os
 from typing import Callable, List
 
+import numpy as np
+import pyqtgraph as pg
 import requests
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QLineEdit, QSplitter,
-                               QTextBrowser, QProgressBar, QHeaderView)
+                               QTextBrowser, QProgressBar, QHeaderView, QDialog)
 
-from ui_common import (UP, DOWN, FLAT, TEXT, TEXT2, Worker, make_table,
-                       cell, pct_color, skeleton_table)
+from ui_common import (UP, DOWN, FLAT, TEXT, TEXT2, CARD, BORDER, Worker,
+                       make_table, cell, pct_color, skeleton_table)
+import data_sources
 import signal_engine
 
 WATCH_FILE = os.path.join(
@@ -32,6 +36,264 @@ SIGNAL_CACHE = os.path.join(
 _SIG_COLOR = {"强烈买入": UP, "买入": UP, "观望": FLAT,
               "卖出": DOWN, "强烈卖出": DOWN}
 
+# 分时窗口可能在取数未完成时被关闭：这里持有 QThread 引用，避免线程运行中被回收
+_LIVE_WORKERS = set()
+
+
+class _TickAxis(pg.AxisItem):
+    """把整数索引映射为自定义刻度文本（时间或日期）。"""
+
+    def __init__(self, labels):
+        super().__init__(orientation="bottom")
+        self.labels = labels
+
+    def tickStrings(self, values, scale, spacing):
+        out = []
+        for v in values:
+            i = int(round(v))
+            out.append(self.labels[i] if 0 <= i < len(self.labels) else "")
+        return out
+
+
+def _signal_history(df, days: int = 60) -> list:
+    """按自选信号同一套日线规则回溯最近的买入/卖出信号。
+
+    返回 [(日期, 信号等级, 总分)]，仅含买入/卖出类信号（不含观望）。
+    """
+    events = []
+    start = max(60, len(df) - days)
+    for i in range(start, len(df)):
+        sub = df.iloc[:i + 1]
+        try:
+            ind = signal_engine.compute_indicators(sub)
+            total, _, _ = signal_engine.score_signals(ind)
+            grade, _ = signal_engine._grade(total)
+        except Exception:
+            continue
+        if grade in ("强烈买入", "买入", "卖出", "强烈卖出"):
+            events.append((sub.index[-1].strftime("%Y-%m-%d"),
+                           grade, round(float(total), 2)))
+    return events
+
+
+class IntradayDialog(QDialog):
+    """个股分时窗口：近两日 5 分钟 K 线 + 当日实时快照 + 近 90 日买卖信号标注。"""
+
+    def __init__(self, code: str, name: str, parent=None):
+        super().__init__(parent)
+        self.code, self.name = code, name
+        self._workers = []
+        self.setWindowTitle(f"{code} {name} · 分时与买卖点")
+        self.resize(1000, 760)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+        top = QHBoxLayout()
+        self.info = QLabel("正在加载分时与买卖点…")
+        self.info.setWordWrap(True)
+        self.info.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
+        self.reload_btn = QPushButton("重新加载")
+        self.reload_btn.clicked.connect(self._load)
+        top.addWidget(self.info, 1)
+        top.addWidget(self.reload_btn)
+        lay.addLayout(top)
+        self.gw = pg.GraphicsLayoutWidget()
+        self.gw.setStyleSheet(f"border:1px solid {BORDER}; border-radius:6px;")
+        lay.addWidget(self.gw, 1)
+        self._load()
+
+    # ---------- 取数 ----------
+    def _load(self):
+        self.reload_btn.setEnabled(False)
+        self.info.setText("正在加载分时与买卖点…")
+        self.gw.clear()
+        w = Worker(self._fetch)
+        w.done.connect(self._render)
+        w.error.connect(self._on_error)
+        w.finished.connect(self._finished)
+        _LIVE_WORKERS.add(w)
+        w.finished.connect(lambda: _LIVE_WORKERS.discard(w))
+        self._workers.append(w)
+        w.start()
+
+    def _fetch(self, _progress=None):
+        end = dt.date.today()
+        m_start = (end - dt.timedelta(days=14)).strftime("%Y%m%d")
+        d_start = (end - dt.timedelta(days=460)).strftime("%Y%m%d")
+        e = end.strftime("%Y%m%d")
+        out = {"snap": None, "minute": None, "daily": None, "err": []}
+        try:
+            out["snap"] = data_sources.fetch_realtime_snapshot(self.code)
+        except Exception as ex:  # noqa
+            out["err"].append(f"实时快照失败：{ex}")
+        try:
+            out["minute"] = data_sources.fetch_minute(
+                self.code, m_start, e, "5")
+        except Exception as ex:  # noqa
+            out["err"].append(f"分钟线失败：{ex}")
+        try:
+            out["daily"] = data_sources.fetch_daily_fast(self.code, d_start, e)
+        except Exception as ex:  # noqa
+            out["err"].append(f"日线失败：{ex}")
+        return out
+
+    def _finished(self):
+        self.reload_btn.setEnabled(True)
+        self._workers = [w for w in self._workers if w.isRunning()]
+
+    def _on_error(self, msg):
+        self.info.setText(f"加载失败：{msg}")
+
+    # ---------- 渲染 ----------
+    def _render(self, data):
+        snap = data.get("snap") or {}
+        minute, daily = data.get("minute"), data.get("daily")
+        events = (_signal_history(daily)
+                  if daily is not None and len(daily) >= 61 else [])
+
+        nm = snap.get("name") or self.name
+        parts = []
+        if snap.get("price"):
+            parts.append(
+                f"<b>{nm} {self.code}</b> 现价 {snap['price']:.2f}"
+                f"（{snap.get('change_pct', 0):+.2f}%）")
+            parts.append(
+                f"今开 {snap.get('open', 0):.2f} · 昨收 "
+                f"{snap.get('prev_close', 0):.2f} · 最高 "
+                f"{snap.get('high', 0):.2f} · 最低 {snap.get('low', 0):.2f}")
+        elif nm:
+            parts.append(f"<b>{nm} {self.code}</b>")
+        if events:
+            buys = [e for e in events if "买入" in e[1]]
+            sells = [e for e in events if "卖出" in e[1]]
+            if buys:
+                e = buys[-1]
+                parts.append(f"最近买入：{e[0]}（{e[1]} {e[2]:+.2f} 分）")
+            if sells:
+                e = sells[-1]
+                parts.append(f"最近卖出：{e[0]}（{e[1]} {e[2]:+.2f} 分）")
+        if data.get("err"):
+            parts.append("<span style='color:#B45309'>"
+                         + "；".join(data["err"]) + "</span>")
+        parts.append("信号为日线技术面回溯（未含市场环境修正）")
+        self.info.setText(" · ".join(parts))
+
+        self._draw_minute(minute, snap)
+        self._draw_daily(daily, events)
+        try:
+            self.gw.ci.layout.setRowStretchFactor(0, 3)
+            self.gw.ci.layout.setRowStretchFactor(1, 1)
+            self.gw.ci.layout.setRowStretchFactor(2, 2)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        for w in self._workers:
+            try:
+                w.done.disconnect()
+                w.error.disconnect()
+                w.finished.disconnect()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def _draw_minute(self, minute, snap):
+        if minute is None or len(minute) < 2:
+            return
+        dates = list(dict.fromkeys(minute["date"].tolist()))
+        keep = dates[-2:]                     # 最近两个交易日
+        m = minute[minute["date"].isin(keep)].reset_index(drop=True)
+        if len(m) < 2:
+            return
+        x = np.arange(len(m))
+        labels = m["time"].tolist()
+        closes = m["close"].astype(float).to_numpy()
+        opens = m["open"].astype(float).to_numpy()
+        vols = m["volume"].astype(float).to_numpy()
+
+        p1 = self.gw.addPlot(row=0, col=0,
+                             axisItems={"bottom": _TickAxis(labels)})
+        p1.plot(x, closes, pen=pg.mkPen("#2E6FD6", width=1.6))
+        p1.showGrid(x=True, y=True, alpha=0.2)
+        p1.setLabel("left", "价格")
+
+        # 当日快照叠加：现价 / 昨收 水平线，并在日界处画分隔线
+        pc = float(snap.get("price") or closes[-1])
+        p1.addItem(pg.InfiniteLine(
+            pos=pc, angle=0, pen=pg.mkPen(UP, width=1.2),
+            label=f"现价 {pc:.2f}",
+            labelOpts={"position": 0.05, "color": UP}))
+        prev = float(snap.get("prev_close") or 0)
+        if prev > 0:
+            p1.addItem(pg.InfiniteLine(
+                pos=prev, angle=0,
+                pen=pg.mkPen("#8A8F99", style=Qt.DashLine),
+                label=f"昨收 {prev:.2f}",
+                labelOpts={"position": 0.05, "color": "#8A8F99"}))
+        if len(keep) == 2:
+            edge = int((m["date"] == keep[-1]).to_numpy().argmax())
+            if edge > 0:
+                p1.addItem(pg.InfiniteLine(
+                    pos=edge - 0.5, angle=90,
+                    pen=pg.mkPen("#C9CDD4", style=Qt.DashLine)))
+            ymax = float(np.nanmax(closes)) if len(closes) else 1.0
+            for d, idx in ((keep[0], 1), (keep[-1], edge + 1)):
+                t = pg.TextItem(d[5:], color=TEXT2, anchor=(0, 0))
+                t.setPos(idx, ymax * 1.01)
+                p1.addItem(t)
+
+        p2 = self.gw.addPlot(row=1, col=0)
+        p2.setXLink(p1)
+        p2.addItem(pg.BarGraphItem(
+            x=x, height=vols, width=0.7,
+            brushes=[UP if c >= o else DOWN for c, o in zip(closes, opens)]))
+        p2.setLabel("left", "成交量")
+        p2.getAxis("bottom").setStyle(showValues=False)
+
+    def _draw_daily(self, daily, events):
+        if daily is None or len(daily) < 30:
+            return
+        d = daily.tail(90)
+        dates = [i.strftime("%m-%d") for i in d.index]
+        x = np.arange(len(d))
+        closes = d["close"].astype(float).to_numpy()
+
+        p3 = self.gw.addPlot(row=2, col=0,
+                             axisItems={"bottom": _TickAxis(dates)})
+        p3.plot(x, closes, pen=pg.mkPen("#2E6FD6", width=1.2))
+        p3.showGrid(x=True, y=True, alpha=0.2)
+        p3.setLabel("left", "收盘")
+
+        pos = {i.strftime("%Y-%m-%d"): k for k, i in enumerate(d.index)}
+        bx, by, sx, sy = [], [], [], []
+        for date, grade, _score in events:
+            k = pos.get(date)
+            if k is None:
+                continue
+            (bx if "买入" in grade else sx).append(k)
+            (by if "买入" in grade else sy).append(closes[k])
+        if bx:
+            p3.addItem(pg.ScatterPlotItem(
+                bx, by, symbol="t1", size=11, brush=UP, pen=pg.mkPen(UP),
+                name="买入信号"))
+        if sx:
+            p3.addItem(pg.ScatterPlotItem(
+                sx, sy, symbol="t", size=11, brush=DOWN, pen=pg.mkPen(DOWN),
+                name="卖出信号"))
+        if bx or sx:
+            p3.addLegend(offset=(4, 4))
+
+        # 标注最近一次信号
+        if events:
+            date, grade, score = events[-1]
+            k = pos.get(date)
+            if k is not None:
+                color = UP if "买入" in grade else DOWN
+                t = pg.TextItem(f"{date[5:]} {grade} {score:+.1f}",
+                                color=color, anchor=(0, 1))
+                t.setPos(k, closes[k])
+                p3.addItem(t)
+
 
 class WatchlistPage(QWidget):
     def __init__(self, set_status: Callable[[str], None]):
@@ -40,6 +302,7 @@ class WatchlistPage(QWidget):
         self.items: List[dict] = []
         self.signals: List[dict] = []
         self._workers = []
+        self._dialogs = []
         self._load()
         self._build()
         # 1. 先用本地清单立即渲染（代码/名称一定在）
@@ -112,6 +375,9 @@ class WatchlistPage(QWidget):
         add_btn.clicked.connect(self.add)
         del_btn = QPushButton("移除选中")
         del_btn.clicked.connect(self.remove)
+        self.intraday_btn = QPushButton("分时图")
+        self.intraday_btn.setToolTip("查看选中个股的 5 分钟分时、当日快照与买卖信号标注")
+        self.intraday_btn.clicked.connect(self.open_intraday)
         self.refresh_btn = QPushButton("刷新买卖信号")
         self.refresh_btn.setObjectName("Primary")
         self.refresh_btn.clicked.connect(self.refresh_signals)
@@ -125,6 +391,7 @@ class WatchlistPage(QWidget):
         self.progress.setFixedWidth(140)
         self.progress.setVisible(False)
         bl.addWidget(self.progress)
+        bl.addWidget(self.intraday_btn)
         bl.addWidget(self.refresh_btn)
         root.addWidget(bar)
 
@@ -146,6 +413,7 @@ class WatchlistPage(QWidget):
         # 列数少且内容短：平均铺满卡片宽度，避免表格右侧出现大片空白
         self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl.itemSelectionChanged.connect(self._show_detail)
+        self.tbl.cellDoubleClicked.connect(lambda _r, _c: self.open_intraday())
         split.addWidget(self.tbl)
 
         card = QFrame()
@@ -211,6 +479,33 @@ class WatchlistPage(QWidget):
         else:
             self.tbl.setRowCount(0)
             self.detail.clear()
+
+    def open_intraday(self):
+        """打开选中个股的分时窗口（也可双击表格行）。"""
+        row = None
+        rows = self.tbl.selectionModel().selectedRows()
+        if rows:
+            row = rows[0].row()
+        elif self.tbl.currentRow() >= 0:
+            row = self.tbl.currentRow()
+        if row is None:
+            self.set_status("请先选择一个自选股，或双击表格行")
+            return
+        item = self.tbl.item(row, 0)
+        if item is None:
+            return
+        st = item.data(Qt.UserRole) or {}
+        code = st.get("code") if isinstance(st, dict) else None
+        code = code or item.text()
+        if not (len(code) == 6 and code.isdigit()):
+            return
+        name_item = self.tbl.item(row, 1)
+        name = name_item.text() if name_item else ""
+        dlg = IntradayDialog(code, name, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._dialogs = [d for d in self._dialogs if d.isVisible()]
+        self._dialogs.append(dlg)
+        dlg.show()
 
     def refresh_signals(self):
         if not self.items:
