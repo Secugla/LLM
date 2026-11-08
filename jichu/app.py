@@ -302,9 +302,11 @@ class MainWindow(QMainWindow):
         if now.weekday() >= 5:
             return
         for slot, (h, m) in BATCH_TIMES.items():
-            if now.hour == h and m <= now.minute <= m + 2:
-                key = f"{slot}_{now.date()}"
-                if self._auto_gen.get(slot) == str(now.date()):
+            if now.hour == h and m <= now.minute <= m + 5:
+                if (self._auto_gen.get(slot) == str(now.date())
+                        or self.recommend_page.has_result_today(slot)):
+                    # 当天已有结果（含手动生成）则不再重复抓取
+                    self._auto_gen[slot] = str(now.date())
                     continue
                 self._auto_gen[slot] = str(now.date())
                 self.set_status(

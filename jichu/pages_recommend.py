@@ -186,6 +186,10 @@ class RecommendPage(QWidget):
         self.batch = slot
         self._run(slot, manual=False)
 
+    def has_result_today(self, slot: str) -> bool:
+        """当天该批次是否已有结果（自动任务据此避免重复抓取）。"""
+        return self.results.get(slot) is not None
+
     def _run(self, slot: str, manual: bool):
         if self._busy:
             return
@@ -193,17 +197,26 @@ class RecommendPage(QWidget):
         self.btn.setEnabled(False)
         self.progress.setVisible(True)
         kind = "手动" if manual else "自动"
-        self.set_status(f"正在{kind}生成{dict(BATCHES)[slot]}多因子荐股…")
+        label = dict(BATCHES)[slot]
+        self.set_status(f"正在{kind}生成{label}多因子荐股…")
         skeleton_table(self.pick_tbl, 8, "正在多因子打分…")
 
         def task(p):
             snap = self.provider()
-            if snap is None:
+            # 午盘批必须使用当日 11:30 的上午收盘行情与板块数据，因此强制刷新
+            if slot == "noon":
+                p("午盘批：重新抓取上午收盘行情与板块强弱…")
+                snap = market_info.refresh_all(progress=p, force=True)
+                self.on_snapshot(snap)
+            elif snap is None:
                 p("信息尚未加载，先抓取最新消息…")
                 snap = market_info.refresh_all(progress=p)
                 self.on_snapshot(snap)
-            p("正在结合当日信息与题材打分（趋势/量价/轮动/龙头/题材/风险）…")
-            res = recommender.recommend(snap, progress=p)
+            if slot == "noon":
+                p("正在按「上午强度 + 板块排名 + 半日量能」重排午后推荐…")
+            else:
+                p("正在结合当日信息与题材打分（趋势/量价/轮动/龙头/题材/风险）…")
+            res = recommender.recommend(snap, progress=p, session=slot)
             res["slot"] = slot
             res["manual"] = manual
             res["generated_at"] = dt.datetime.now().strftime(
@@ -264,8 +277,13 @@ class RecommendPage(QWidget):
         notes = res.get("data_notes") or []
         extra = (f" · 全市场 {res.get('universe', 0)} 只 / "
                  f"候选 {res.get('candidates', 0)} 只")
-        self.note_lbl.setText(("；".join(notes) if notes else
-                               "数据完整：行情 + 日线 + 板块轮动 + 题材") + extra)
+        brief = res.get("session_brief") or ""
+        if brief:
+            self.note_lbl.setText(brief + extra)
+            self.note_lbl.setToolTip("；".join(notes))
+        else:
+            self.note_lbl.setText(("；".join(notes) if notes else
+                                   "数据完整：行情 + 日线 + 板块轮动 + 题材") + extra)
 
         self.pick_tbl.setSortingEnabled(False)
         self.pick_tbl.setRowCount(0)
@@ -355,16 +373,28 @@ class RecommendPage(QWidget):
         if not p:
             return
         name = p.get("name", "")
-        html = (f"<b style='color:{UP}'>#{p.get('rank', '')} "
-                f"{p.get('code', '')} {name}</b> "
-                f"<span style='color:{TEXT2}'>{p.get('industry', '')} · "
-                f"{p.get('market', '')}</span><br>")
+        html = ""
+        brief = (self.results.get(self.batch) or {}).get("session_brief") or ""
+        if brief:
+            html += (f"<span style='color:{TEXT2}'>{brief}</span>"
+                     f"<hr style='border:none;border-top:1px solid #E6E8EB'>")
+        html += (f"<b style='color:{UP}'>#{p.get('rank', '')} "
+                 f"{p.get('code', '')} {name}</b> "
+                 f"<span style='color:{TEXT2}'>{p.get('industry', '')} · "
+                 f"{p.get('market', '')}</span><br>")
         html += f"<b>综合分 {float(p.get('score', 0)):.1f} / 100</b>"
+        bonus = float(p.get("session_bonus", 0) or 0)
+        if bonus:
+            html += f" · 午盘修正 {bonus:+.1f}"
         if p.get("leader_flag"):
             html += f" · <b>{p['leader_flag']}</b>"
         html += (f" · 风险等级 <span style='color:"
                  f"{UP if p.get('risk') == '高' else TEXT2}'>{p.get('risk', '')}"
-                 f"</span><br>")
+                 f"</span>")
+        if p.get("tags"):
+            html += f"<br><span style='color:{WARN}'>" + \
+                    " / ".join(p["tags"]) + "</span>"
+        html += "<br>"
 
         # 因子条
         fs = p.get("factors") or {}
@@ -382,6 +412,14 @@ class RecommendPage(QWidget):
                      f"<td style='color:{color}'>{bar}</td>"
                      f"<td>{item.get('note', '')}</td></tr>")
         html += "</table>"
+        m = p.get("morning") or {}
+        if m:
+            html += (f"<b>上午盘面：</b>涨 {m.get('change_pct', 0):+.1f}% · "
+                     f"成交额 {m.get('amount', 0):.2f} 亿 · "
+                     f"换手 {m.get('turnover', 0):.1f}% · "
+                     f"{m.get('sector', '')} {m.get('sector_pct', 0):+.1f}%"
+                     + (f"（{m.get('stage')}）" if m.get("stage") else "")
+                     + f" · 全市场上涨占比 {m.get('up_ratio', 0.5):.0%}<br>")
         if p.get("data_quality") == "降级":
             html += (f"<span style='color:{WARN}'>数据降级：日线不可用，"
                      f"因子按行情快照估算</span><br>")

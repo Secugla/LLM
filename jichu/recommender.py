@@ -96,6 +96,10 @@ class Pick:
     hot_score: float = 0.0
     news_score: float = 0.0
     tech_score: float = 0.0
+    # 午盘批：上午盘面与午后修正
+    session_bonus: float = 0.0
+    session_note: str = ""
+    morning: dict = field(default_factory=dict)
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -164,16 +168,21 @@ def _build_info_features(snapshot) -> dict:
 # ============================================================
 #  候选粗筛（快照层，不请求日线）
 # ============================================================
-def _pre_score(q: dict, code: str, info: dict) -> float:
-    """用行情快照快速排序，选出进入精算的候选（控制请求量）。"""
+def _pre_score(q: dict, code: str, info: dict,
+               session: str = "morning") -> float:
+    """用行情快照快速排序，选出进入精算的候选（控制请求量）。
+
+    session="noon" 时成交额为半日数据，强度按 ×2 估算做可比处理。
+    """
     cp = q.get("change_pct", 0) or 0
     lim = limit_pct_of(code)
     ind = (q.get("industry") or "").strip()
     rot = info["rotation"].get(ind)
+    amount = (q.get("amount", 0) or 0) * (2 if session == "noon" else 1)
     s = 0.0
     s += _clamp(cp / max(lim * 0.8, 1)) * 8               # 强度
     s += _clamp((q.get("turnover", 0) or 0) / 12) * 4     # 换手活性
-    s += _clamp((q.get("amount", 0) or 0) / 3e8) * 5      # 成交额
+    s += _clamp(amount / 3e8) * 5                         # 成交额
     if rot:
         s += _clamp(max(rot.get("change_pct", 0), 0) / 3) * 5
         s += _clamp(rot.get("zt_today", 0) / 5) * 5
@@ -181,7 +190,8 @@ def _pre_score(q: dict, code: str, info: dict) -> float:
     return round(s, 2)
 
 
-def _hard_exclude(q: dict, code: str) -> Optional[str]:
+def _hard_exclude(q: dict, code: str,
+                  session: str = "morning") -> Optional[str]:
     """风险剔除（硬门槛）：返回剔除原因，None 表示保留。"""
     name = q.get("name", "")
     if q.get("is_st") or "ST" in name or "退" in name:
@@ -190,9 +200,12 @@ def _hard_exclude(q: dict, code: str) -> Optional[str]:
         return "新股"
     if q.get("price", 0) <= 0:
         return "停牌"
-    if q.get("amount", 0) < 0.8 * 1e8:
+    # 午盘只有上午半日成交额，门槛相应下调
+    min_amt = 0.4 * 1e8 if session == "noon" else 0.8 * 1e8
+    if q.get("amount", 0) < min_amt:
         return "成交额不足"
-    if (q.get("turnover", 0) or 0) > 35:
+    turnover_cap = 22 if session == "noon" else 35
+    if (q.get("turnover", 0) or 0) > turnover_cap:
         return "换手过热"
     mv = q.get("total_mv") or q.get("circ_mv") or 0
     if mv < 20 or mv > 5000:
@@ -206,12 +219,18 @@ def _hard_exclude(q: dict, code: str) -> Optional[str]:
 #  因子计算
 # ============================================================
 def _calc_factors(q: dict, code: str, info: dict, feat: Optional[dict],
-                  weekly: Optional[dict], themes: Optional[dict]) -> dict:
-    """返回 {因子key: {score,max,note}}；总分为各因子之和。"""
+                  weekly: Optional[dict], themes: Optional[dict],
+                  session: str = "morning") -> dict:
+    """返回 {因子key: {score,max,note}}；总分为各因子之和。
+
+    session="noon" 时成交额只覆盖上午半日，按 ×2 折算后再与全天阈值比较。
+    """
     cp = q.get("change_pct", 0) or 0
     lim = limit_pct_of(code)
     turnover = q.get("turnover", 0) or 0
     amount = q.get("amount", 0) or 0
+    amount_eff = amount * (2 if session == "noon" else 1)
+    half_tag = "（半日×2）" if session == "noon" else ""
     ind = (q.get("industry") or "").strip()
     rot = info["rotation"].get(ind)
 
@@ -247,12 +266,13 @@ def _calc_factors(q: dict, code: str, info: dict, feat: Optional[dict],
     v_note = f"量比{vr:.2f}、换手{turnover:.1f}%"
 
     # ---- F3 流动性（8） ----
-    liq = 4 if amount >= 5e8 else (3 if amount >= 2e8 else
-                                    (2 if amount >= 1e8 else 1))
+    liq = 4 if amount_eff >= 5e8 else (3 if amount_eff >= 2e8 else
+                                       (2 if amount_eff >= 1e8 else 1))
     liq += 2 if 2 <= turnover <= 15 else 0
     liq += 2 if 30 <= (q.get("circ_mv") or 0) <= 1500 else 0
     liq = round(min(liq, 8), 1)
-    liq_note = f"成交额{amount / 1e8:.2f}亿，流通市值{(q.get('circ_mv') or 0):.0f}亿"
+    liq_note = (f"成交额{amount / 1e8:.2f}亿{half_tag}，"
+                f"流通市值{(q.get('circ_mv') or 0):.0f}亿")
 
     # ---- F4 板块轮动（20） ----
     if rot:
@@ -312,14 +332,14 @@ def _calc_factors(q: dict, code: str, info: dict, feat: Optional[dict],
         ("题材：" + "、".join(concepts[:3]) if concepts else "无题材数据")
 
     # ---- F7 资金强度（8） ----
-    cap = _clamp(amount / 10e8) * 3
+    cap = _clamp(amount_eff / 10e8) * 3
     if 0.5 <= cp <= lim * 0.7:
         cap += 3
     elif cp > 0:
         cap += 1.5
     cap += 2 if (feat and feat.get("breakout")) else 0
     cap = round(min(cap, 8), 1)
-    cap_note = (f"成交额{amount / 1e8:.2f}亿，涨幅{cp:+.1f}%"
+    cap_note = (f"成交额{amount / 1e8:.2f}亿{half_tag}，涨幅{cp:+.1f}%"
                 + ("，放量突破" if feat and feat.get("breakout") else ""))
 
     # ---- F8 风险质量（10，扣分制） ----
@@ -394,6 +414,134 @@ def apply_weights(factors: dict, weights: Optional[dict]) -> tuple:
 
 
 # ============================================================
+#  午盘批：上午行情 / 板块强弱 / 午后推荐逻辑
+# ============================================================
+def _session_ctx(snapshot, quotes: dict, session: str) -> dict:
+    """汇总上午盘面（午盘批）：指数、涨跌家数、情绪、板块强弱排名。"""
+    idx = (getattr(snapshot, "indices", None) or {}) if snapshot else {}
+    pcts = [float(v.get("change_pct", 0) or 0) for v in idx.values()]
+    idx_pct = round(sum(pcts) / len(pcts), 2) if pcts else 0.0
+    up = sum(1 for q in quotes.values() if (q.get("change_pct") or 0) > 0)
+    down = sum(1 for q in quotes.values() if (q.get("change_pct") or 0) < 0)
+    traded = up + down
+    up_ratio = (up / traded) if traded else 0.5
+    sent = (getattr(snapshot, "sentiment", None) or {}) if snapshot else {}
+    temp = float(sent.get("temperature", 50) or 50)
+
+    boards = list((getattr(snapshot, "em_industry_boards", None) or [])
+                  if snapshot else [])
+    boards.sort(key=lambda b: float(b.get("change_pct", 0) or 0), reverse=True)
+    strong = [(str(b.get("name", "")), round(float(b.get("change_pct", 0) or 0), 2))
+              for b in boards[:5] if b.get("name")]
+    weak = [(str(b.get("name", "")), round(float(b.get("change_pct", 0) or 0), 2))
+            for b in boards[-3:] if b.get("name")]
+    return {
+        "session": session,
+        "half": "上午" if session == "noon" else "全天",
+        "index_pct": idx_pct, "up": up, "down": down,
+        "up_ratio": round(up_ratio, 3), "temperature": temp,
+        "mood": sent.get("label", "") or "",
+        "strong": strong, "weak": weak,
+        "sector_rank": {name: i for i, (name, _) in enumerate(strong)},
+        "limit_up": len(getattr(snapshot, "limit_up", None) or []) if snapshot else 0,
+        "asof": getattr(snapshot, "asof", "") if snapshot else "",
+    }
+
+
+def _afternoon_view(cp: float, lim: float, sector_pct: float, rot: dict,
+                    ctx: dict, turnover: float) -> str:
+    """按上午盘面给出午后操作要点（可解释、可执行）。"""
+    tips = []
+    if cp >= lim - 1.5:
+        tips.append("已贴近涨停，午后重点看封单稳定性与炸板风险，空仓不追高，持仓可持有")
+    elif cp >= lim * 0.5:
+        tips.append("上午走势偏强，午后若回踩不破上午均价可持有，放量滞涨则减仓")
+    stage = rot.get("stage", "")
+    if stage in ("升温启动", "加速", "走强"):
+        tips.append(f"板块处于{stage}阶段，午后若出现涨停扩散，优先参与板块龙头")
+    elif sector_pct <= 0:
+        tips.append("所属板块上午走弱，午后以个股独立强度为主，仓位不宜过重")
+    if ctx.get("up_ratio", 0.5) < 0.35:
+        tips.append("上午市场普跌、赚钱效应差，午后只做最强主线，控制仓位")
+    elif ctx.get("up_ratio", 0.5) > 0.65:
+        tips.append("上午普涨、情绪偏暖，午后可适度放大仓位，但需防高位分化")
+    if turnover >= 20:
+        tips.append("上午换手偏高，注意午后获利盘兑现压力")
+    if not tips:
+        tips.append("上午表现平稳，午后跟随板块龙头节奏，跌破上午低点止损")
+    return "；".join(tips)
+
+
+def _session_adjust(q: dict, code: str, info: dict, ctx: dict,
+                    session: str) -> tuple:
+    """午盘批修正：上午强度/板块排名/半日量能/市场宽度 → (加分, 标签, 数据, 说明)。"""
+    if session != "noon":
+        return 0.0, [], {}, []
+    cp = q.get("change_pct", 0) or 0
+    lim = limit_pct_of(code)
+    turnover = q.get("turnover", 0) or 0
+    amount = q.get("amount", 0) or 0
+    ind = (q.get("industry") or "").strip()
+    sector_pct = float(info["sector_pct"].get(ind, 0) or 0)
+    rot = info["rotation"].get(ind) or {}
+
+    bonus, tags = 0.0, []
+    bonus += _clamp(cp / max(lim, 1)) * 2.0
+    if cp >= lim - 1.5:
+        tags.append("上午近涨停")
+        bonus += 0.8
+    elif cp >= lim * 0.5:
+        tags.append("上午强势")
+    rank = ctx["sector_rank"].get(ind)
+    if rank is not None:
+        bonus += max(0.0, 2.0 - rank * 0.3)
+        if rank < 3:
+            tags.append("上午领涨板块")
+    if amount >= 6e8:
+        bonus += 1.0
+        tags.append("上午放量")
+    if turnover >= 8:
+        bonus += 0.5
+    if ctx.get("up_ratio", 0.5) < 0.35:
+        bonus -= 1.2
+        tags.append("上午普跌")
+    elif ctx.get("up_ratio", 0.5) > 0.65:
+        bonus += 0.6
+        tags.append("上午普涨")
+    bonus = round(max(-3.0, min(4.0, bonus)), 1)
+
+    morning = {
+        "change_pct": round(cp, 2), "amount": round(amount / 1e8, 2),
+        "turnover": round(turnover, 1), "sector": ind,
+        "sector_pct": sector_pct, "stage": rot.get("stage", ""),
+        "up_ratio": ctx.get("up_ratio", 0.5),
+    }
+    notes = [
+        f"上午盘面：涨{cp:+.1f}%、成交额{amount / 1e8:.2f}亿、"
+        f"换手{turnover:.1f}%；{ind or '所属板块'}上午{sector_pct:+.1f}%"
+        + (f"（{rot.get('stage')}）" if rot.get("stage") else ""),
+        "午后策略：" + _afternoon_view(cp, lim, sector_pct, rot, ctx, turnover),
+    ]
+    return bonus, tags, morning, notes
+
+
+def _session_brief(ctx: dict, session: str) -> str:
+    """午盘批的盘面小结（页面展示）。"""
+    if session != "noon":
+        return ""
+    strong = "、".join(f"{n}({p:+.1f}%)" for n, p in ctx.get("strong", [])[:3]) or "暂无"
+    weak = "、".join(f"{n}({p:+.1f}%)" for n, p in ctx.get("weak", [])[:2]) or "暂无"
+    return (f"午盘批：上午指数均值 {ctx.get('index_pct', 0):+.2f}%，"
+            f"上涨 {ctx.get('up', 0)} 家 / 下跌 {ctx.get('down', 0)} 家"
+            f"（涨跌比 {ctx.get('up_ratio', 0.5):.2f}），"
+            f"情绪 {ctx.get('temperature', 50):.0f}（{ctx.get('mood', '')}），"
+            f"上午涨停 {ctx.get('limit_up', 0)} 家；"
+            f"领涨板块：{strong}；走弱板块：{weak}。"
+            f"下午盘按「上午强度 + 板块排名 + 半日量能」重新排序，"
+            f"优先沿上午领涨主线参与，回避冲高回落品种")
+
+
+# ============================================================
 #  主流程
 # ============================================================
 def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
@@ -402,11 +550,13 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
               quotes: Optional[dict] = None,
               weights: Optional[dict] = None,
               industry_cap: int = 3,
-              min_score: float = 38) -> dict:
+              min_score: float = 38,
+              session: str = "morning") -> dict:
     """
     开盘前多因子荐股。
     weights / industry_cap / min_score 为机构策略「近似套用」参数：
     不传时与原来的默认行为完全一致。
+    session="noon" 时使用上午行情与板块数据重排，并输出午后操作逻辑。
     返回 {picks, ladder, rotation, asof, trade_date, generated_at,
           degraded, data_notes, universe, candidates, factors_meta}。
     """
@@ -455,15 +605,19 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
     if not is_trading_time():
         notes.append("非交易时段：行情为最近一个交易日收盘数据")
 
+    ctx = _session_ctx(snapshot, quotes, session)
+    if session == "noon":
+        notes.append("午盘批：使用上午收盘行情与上午板块强弱，面向 13:00 后下午盘")
+
     log(f"全市场 {len(quotes)} 只，风险剔除并按强度粗筛…")
     pool = []
     excluded = {}
     for code, q in quotes.items():
-        why = _hard_exclude(q, code)
+        why = _hard_exclude(q, code, session)
         if why:
             excluded[why] = excluded.get(why, 0) + 1
             continue
-        pool.append((code, q, _pre_score(q, code, info)))
+        pool.append((code, q, _pre_score(q, code, info, session)))
     pool.sort(key=lambda x: x[2], reverse=True)
     cands = pool[:max(max_candidates, top_n * 3)]
     log(f"候选 {len(cands)} 只（剔除："
@@ -477,8 +631,8 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
     for code in leader_codes:
         if code not in cand_codes and code in quotes:
             q = quotes[code]
-            if _hard_exclude(q, code) is None:
-                cands.append((code, q, _pre_score(q, code, info)))
+            if _hard_exclude(q, code, session) is None:
+                cands.append((code, q, _pre_score(q, code, info, session)))
 
     end = dt.date.today().strftime("%Y%m%d")
     start = (dt.date.today() - dt.timedelta(days=520)).strftime("%Y%m%d")
@@ -527,10 +681,14 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
     for code, q, pre in cands:
         themes = theme_map.get(code)
         res = _calc_factors(q, code, info, feats.get(code),
-                            weeklys.get(code), themes)
+                            weeklys.get(code), themes, session)
         # 机构策略套用：按目标权重重分配满分（默认权重时与原始满分一致）
         factors, effective_meta = apply_weights(res["factors"], weights)
-        total = round(sum(v["score"] for v in factors.values()), 1)
+        base_total = sum(v["score"] for v in factors.values())
+        # 午盘批：上午强度 + 板块排名 + 半日量能修正（收盘批不生效）
+        s_bonus, s_tags, morning, s_notes = _session_adjust(
+            q, code, info, ctx, session)
+        total = round(min(100.0, base_total + s_bonus), 1)
         reasons = []
         for key in ("rotation", "trend", "volume", "leader", "theme", "capital"):
             note = factors[key]["note"]
@@ -538,10 +696,13 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
                 reasons.append(f"{FACTOR_META[key]['name']}：{note}")
         if res["hit_concepts"]:
             reasons.append("题材共振：" + "、".join(res["hit_concepts"]))
+        reasons.extend(s_notes)
         reasons.append(factors["risk"]["note"])
         if res["data_quality"] == "降级":
             reasons.append("数据降级：日线不可用，仅按行情快照打分")
 
+        base_tags = ["周线多头"] if (weeklys.get(code)
+                                    and weeklys[code].get("bull")) else []
         picks.append(Pick(
             rank=0, code=code, name=q["name"], market=market_of(code),
             price=q["price"], change_pct=q["change_pct"], score=total,
@@ -555,8 +716,7 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
             risk=res["risk_level"], reasons=reasons,
             factors=factors,
             factor_scores={k: v["score"] for k, v in factors.items()},
-            tags=(["周线多头"] if (weeklys.get(code)
-                                  and weeklys[code].get("bull")) else []),
+            tags=base_tags + s_tags,
             data_quality=res["data_quality"],
             pe=float(q.get("pe") or 0),
             pb=float(q.get("pb") or 0),
@@ -567,6 +727,9 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
             hot_score=factors["theme"]["score"],
             news_score=factors["theme"]["score"],
             tech_score=factors["trend"]["score"],
+            session_bonus=s_bonus,
+            session_note=("；".join(s_notes) if s_notes else ""),
+            morning=morning,
         ))
 
     # 硬门槛：综合分过低且无任何题材/轮动支撑的不推荐（避免凑数）
@@ -621,6 +784,9 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
         "rotation": rotation_list,
         "degraded": degraded,
         "data_notes": notes,
+        "session": session,
+        "session_ctx": ctx,
+        "session_brief": _session_brief(ctx, session),
         "universe": len(quotes), "candidates": len(cands),
         "factors_meta": effective_meta,
         "excluded": excluded,
