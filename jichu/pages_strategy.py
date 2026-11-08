@@ -17,10 +17,10 @@ import os
 from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QProgressBar,
-                               QPushButton, QSpinBox, QSplitter, QTextBrowser,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout,
+                               QLabel, QListWidget, QListWidgetItem,
+                               QProgressBar, QPushButton, QSplitter,
+                               QTextBrowser, QVBoxLayout, QWidget)
 
 import market_info
 import recommender
@@ -127,12 +127,13 @@ class StrategyPage(QWidget):
         bl.addWidget(title)
         bl.addSpacing(6)
         bl.addWidget(QLabel("取前"))
-        self.topn = QSpinBox()
-        self.topn.setRange(5, 50)
-        self.topn.setValue(15)
-        self.topn.setFixedWidth(70)
-        bl.addWidget(self.topn)
-        bl.addWidget(QLabel("只"))
+        self.topn_cb = QComboBox()
+        for n in (5, 10, 15, 20, 30, 50):
+            self.topn_cb.addItem(f"{n} 只", n)
+        self.topn_cb.setCurrentIndex(2)
+        self.topn_cb.setFixedWidth(90)
+        self.topn_cb.setToolTip("套用策略后生成的名单数量")
+        bl.addWidget(self.topn_cb)
         self.btn_run = QPushButton("套用该策略生成名单")
         self.btn_run.setObjectName("Primary")
         self.btn_run.clicked.connect(self._run)
@@ -234,12 +235,20 @@ class StrategyPage(QWidget):
         row = max(0, self.list.currentRow())
         return lib.list_strategies()[row]
 
+    def _set_topn(self, n: int):
+        """策略默认数量不在预设档位时自动补一档，保证显示与参数一致。"""
+        idx = self.topn_cb.findData(n)
+        if idx < 0:
+            self.topn_cb.addItem(f"{n} 只", n)
+            idx = self.topn_cb.count() - 1
+        self.topn_cb.setCurrentIndex(idx)
+
     def _select_strategy(self, row: int):
         if row < 0:
             return
         s = lib.list_strategies()[row]
         self.detail.setHtml(render_strategy_html(s))
-        self.topn.setValue(int((s.get("params") or {}).get("top_n", 15)))
+        self._set_topn(int((s.get("params") or {}).get("top_n", 15)))
         w = s.get("weights") or {}
         self.weight_lbl.setText("权重：" + " · ".join(
             f"{FACTOR_LABEL[k]}{w.get(k, 0):.0f}%" for k in FACTOR_KEYS))
@@ -268,7 +277,7 @@ class StrategyPage(QWidget):
 
         params = s.get("params") or {}
         weights = lib.validate_weights(s.get("weights") or {})
-        top_n = self.topn.value()   # 在主线程读取控件值，避免跨线程访问
+        top_n = int(self.topn_cb.currentData())   # 主线程读取控件值，避免跨线程访问
 
         def task(p):
             snap = self.provider()

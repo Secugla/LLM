@@ -328,7 +328,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _startup_refresh(self):
-        self.info_page.refresh(force=False)
+        # 启动时先用本地快照秒开，再强制拉取最新数据并覆盖旧缓存
+        self.info_page.refresh(force=True)
         self.watch_page.start_auto_refresh()
 
     def _refresh_info(self):

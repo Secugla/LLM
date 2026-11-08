@@ -4,7 +4,7 @@ import threading
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel,
-                               QLineEdit, QProgressBar, QPushButton, QSpinBox,
+                               QLineEdit, QProgressBar, QPushButton,
                                QTabWidget, QVBoxLayout, QWidget)
 
 from ui_common import (FLAT, TEXT, TEXT2, WARN, Worker, cell, make_table,
@@ -41,28 +41,27 @@ class QuantLabPage(QWidget):
         ctrl.addWidget(self.strategy)
 
         ctrl.addWidget(QLabel("回测长度"))
-        self.months = QSpinBox()
-        self.months.setRange(3, 60)
-        self.months.setValue(18)
-        self.months.setSuffix(" 个月")
-        self.months.setFixedWidth(96)
+        self.months = QComboBox()
+        for n in (3, 6, 12, 18, 24, 36, 60):
+            self.months.addItem(f"{n} 个月", n)
+        self.months.setCurrentIndex(self.months.findData(18))
+        self.months.setFixedWidth(100)
         ctrl.addWidget(self.months)
 
         ctrl.addWidget(QLabel("股票池"))
-        self.pool = QSpinBox()
-        self.pool.setRange(50, 800)
-        self.pool.setSingleStep(50)
-        self.pool.setValue(200)
-        self.pool.setFixedWidth(84)
+        self.pool = QComboBox()
+        for n in (50, 100, 200, 400, 800):
+            self.pool.addItem(f"{n} 只", n)
+        self.pool.setCurrentIndex(self.pool.findData(200))
+        self.pool.setFixedWidth(90)
         ctrl.addWidget(self.pool)
 
         ctrl.addWidget(QLabel("预测周期"))
-        self.horizon = QSpinBox()
-        self.horizon.setRange(5, 60)
-        self.horizon.setSingleStep(5)
-        self.horizon.setValue(20)
-        self.horizon.setSuffix(" 日")
-        self.horizon.setFixedWidth(84)
+        self.horizon = QComboBox()
+        for n in (5, 10, 20, 30, 60):
+            self.horizon.addItem(f"{n} 日", n)
+        self.horizon.setCurrentIndex(self.horizon.findData(20))
+        self.horizon.setFixedWidth(86)
         ctrl.addWidget(self.horizon)
 
         self.neutral = QCheckBox("行业/市值中性化")
@@ -205,9 +204,9 @@ class QuantLabPage(QWidget):
 
     def _params(self):
         return {
-            "months": self.months.value(),
-            "pool_size": self.pool.value(),
-            "horizon": self.horizon.value(),
+            "months": int(self.months.currentData()),
+            "pool_size": int(self.pool.currentData()),
+            "horizon": int(self.horizon.currentData()),
             "neutralize": self.neutral.isChecked(),
             "fund_boost": self.fund.isChecked(),
             "strategy_id": self.strategy.currentData(),
@@ -321,7 +320,7 @@ class QuantLabPage(QWidget):
         self.skeleton("grid", "正在逐组回测…")
         self._start(
             lambda p: quant_lab.param_grid(
-                code, self.months.value(), 200000,
+                code, int(self.months.currentData()), 200000,
                 self.strategy.currentData(),
                 fund_boost=self.fund.isChecked(),
                 progress=p, cancel=self._cancel),

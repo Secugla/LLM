@@ -332,9 +332,9 @@ def _zt_from_akshare(date: str) -> List[LimitUpStock]:
     return out
 
 
-def _fetch_zt_one(d: str) -> tuple:
+def _fetch_zt_one(d: str, force: bool = False) -> tuple:
     key = f"zt_pool_{d}"
-    cached = cache_load(key, _zt_cache_ttl())
+    cached = None if force else cache_load(key, _zt_cache_ttl())
     if cached:
         return d, [LimitUpStock(**x) for x in cached]
     try:
@@ -377,14 +377,16 @@ def _fetch_zt_one(d: str) -> tuple:
     return d, []
 
 
-def fetch_zt_pool(date: Optional[str] = None) -> tuple:
+def fetch_zt_pool(date: Optional[str] = None,
+                  force: bool = False) -> tuple:
     """
     返回 (实际日期, [LimitUpStock])。
     并发尝试最近 3 个交易日，取最新的有数据的日期（避免串行 7 天空等）。
+    force=True 时跳过本地缓存，强制拉取最新涨停池。
     """
     dates = [date] if date else recent_trade_dates(3)
     with ThreadPoolExecutor(max_workers=min(3, len(dates))) as ex:
-        futs = [ex.submit(_fetch_zt_one, d) for d in dates]
+        futs = [ex.submit(_fetch_zt_one, d, force) for d in dates]
         results = []
         for fut in as_completed(futs):
             try:
@@ -405,13 +407,14 @@ def _dt_cache_ttl() -> float:
     return 120 if is_trading_time() else 6 * 3600
 
 
-def fetch_dt_count(date: Optional[str] = None) -> int:
+def fetch_dt_count(date: Optional[str] = None,
+                   force: bool = False) -> int:
     """跌停家数（用于情绪温度），东财涨停板专题接口。"""
     dates = [date] if date else recent_trade_dates(3)
 
     def one(d):
         key = f"dt_count_{d}"
-        cached = cache_load(key, _dt_cache_ttl())
+        cached = None if force else cache_load(key, _dt_cache_ttl())
         if cached is not None:
             return int(cached)
         r = _retry_get(
@@ -513,9 +516,10 @@ def enrich_zt_reasons(stocks: List[LimitUpStock], workers: int = 8,
 # ============================================================
 #  4. 行业板块（新浪 + 东方财富）
 # ============================================================
-def fetch_industry_sectors() -> List[SectorInfo]:
+def fetch_industry_sectors(force: bool = False) -> List[SectorInfo]:
     """新浪 49 个行业板块涨跌幅。"""
-    cached = cache_load("sina_industry", 60 if is_trading_time() else 900)
+    cached = None if force else cache_load(
+        "sina_industry", 60 if is_trading_time() else 900)
     if cached:
         return [SectorInfo(**x) for x in cached]
     r = _retry_get(
@@ -546,7 +550,8 @@ def fetch_industry_sectors() -> List[SectorInfo]:
     return out
 
 
-def _fetch_em_boards(board_type: str, top: int = 100) -> List[dict]:
+def _fetch_em_boards(board_type: str, top: int = 100,
+                     force: bool = False) -> List[dict]:
     """
     东财板块行情（按涨幅排序）。
       board_type='2' → 细分行业（约 100 个）
@@ -555,7 +560,7 @@ def _fetch_em_boards(board_type: str, top: int = 100) -> List[dict]:
     """
     ttl = 60 if is_trading_time() else 900
     key = f"em_boards_{board_type}"
-    cached = cache_load(key, ttl)
+    cached = None if force else cache_load(key, ttl)
     if cached:
         return cached
     diff_all = []
@@ -591,14 +596,16 @@ def _fetch_em_boards(board_type: str, top: int = 100) -> List[dict]:
     return out
 
 
-def fetch_em_industry_boards(top: int = 100) -> List[dict]:
+def fetch_em_industry_boards(top: int = 100,
+                            force: bool = False) -> List[dict]:
     """东财细分行业板块（比新浪 49 行业更细，带领涨股）。"""
-    return _fetch_em_boards("2", top)
+    return _fetch_em_boards("2", top, force)
 
 
-def fetch_em_concept_boards(top: int = 100) -> List[dict]:
+def fetch_em_concept_boards(top: int = 100,
+                           force: bool = False) -> List[dict]:
     """东财概念板块（当日涨幅靠前的真实概念，过滤统计/宽基标签）。"""
-    return _fetch_em_boards("3", top)
+    return _fetch_em_boards("3", top, force)
 
 
 # ============================================================
@@ -1463,11 +1470,11 @@ def refresh_all_stream(progress: Optional[Callable[[str], None]] = None,
     with ThreadPoolExecutor(max_workers=8) as ex:
         futs = {
             ex.submit(fetch_indices): "indices",
-            ex.submit(fetch_zt_pool, date): "zt",
-            ex.submit(fetch_dt_count, None): "dt",
-            ex.submit(fetch_industry_sectors): "sectors",
-            ex.submit(fetch_em_industry_boards): "em_ind",
-            ex.submit(fetch_em_concept_boards): "em_con",
+            ex.submit(fetch_zt_pool, date, force): "zt",
+            ex.submit(fetch_dt_count, None, force): "dt",
+            ex.submit(fetch_industry_sectors, force): "sectors",
+            ex.submit(fetch_em_industry_boards, 100, force): "em_ind",
+            ex.submit(fetch_em_concept_boards, 100, force): "em_con",
             ex.submit(fetch_all_news, 50, force): "news",
             ex.submit(fetch_lhb, date): "lhb",
             ex.submit(fetch_northbound, date): "north",

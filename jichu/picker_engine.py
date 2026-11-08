@@ -655,6 +655,7 @@ DEFAULT_CONFIG = {
     "scope": "all",          # all/main/gem/star/bj
     "max_candidates": 400,   # 0 = 全部（可能较慢）
     "min_tags": 2,           # 形态组合模式最低命中标签数
+    "require_recent_turnover": 0.0,  # 近一周需出现的最低单日换手（%，0=不要求）
     "workers": 10,
     "with_weekly": True,
     "max_days": 520,
@@ -669,8 +670,31 @@ def _normalize_config(cfg: Optional[dict]) -> dict:
     c["max_mv"] = max(c["min_mv"], float(c.get("max_mv", 3000)))
     c["max_candidates"] = max(0, int(c.get("max_candidates", 400)))
     c["min_tags"] = max(1, int(c.get("min_tags", 2)))
+    c["require_recent_turnover"] = max(
+        0.0, float(c.get("require_recent_turnover", 0.0) or 0.0))
     c["workers"] = max(2, min(20, int(c.get("workers", 10))))
     return c
+
+
+def _week_turnover_peak(df, q: dict) -> float:
+    """估算近一周（最近 5 个交易日）单日换手率峰值。
+
+    用当日成交额/换手率反推流通股本，再换算近几日成交量对应的换手率；
+    数据不足时退化为当日换手率。
+    """
+    t_today = float(q.get("turnover") or 0)
+    try:
+        if len(df) >= 2 and t_today > 0:
+            vols = df["volume"].astype(float)
+            v_last = float(vols.iloc[-1])
+            if v_last > 0:
+                shares = v_last / (t_today / 100.0)
+                if shares > 0:
+                    peak = float((vols.tail(6) / shares * 100).max())
+                    return max(peak, t_today)
+    except Exception:
+        pass
+    return t_today
 
 
 def _scope_ok(code: str, scope: str) -> bool:
@@ -746,6 +770,17 @@ def _analyze_pattern(code: str, q: dict, cfg: dict,
     weekly_tags = groups.get("周线形态", [])
     near = False
 
+    # 额外筛选条件（如「微盘活跃」要求近一周存在换手 > 8%）
+    extra_tags, extra_notes = [], []
+    need_to = cfg.get("require_recent_turnover") or 0
+    if need_to > 0:
+        peak = _week_turnover_peak(df, q)
+        if peak < need_to:
+            return None
+        extra_tags.append("近一周换手活跃")
+        extra_notes.append(
+            f"近一周最大单日换手约 {peak:.1f}%，满足 >{need_to:.0f}%")
+
     if strategy == "pattern":
         if len(tags) < cfg["min_tags"]:
             if (allow_near and cfg["min_tags"] > 1
@@ -784,6 +819,7 @@ def _analyze_pattern(code: str, q: dict, cfg: dict,
         "pass_count": tag_count, "total": tag_count,
         "passed": [{"name": t, "detail": d} for t, d in zip(tags, details)],
         "failed": [], "mode": "pattern", "near": near,
+        "extra_tags": extra_tags, "extra_notes": extra_notes,
     }
 
 
@@ -799,6 +835,17 @@ def _analyze_strict(code: str, q: dict, strategy: str,
         return None
     if df is None or len(df) < 260:
         return None
+
+    # 额外筛选条件（如「微盘活跃」要求近一周存在换手 > 8%）
+    extra_tags, extra_notes = [], []
+    need_to = cfg.get("require_recent_turnover") or 0
+    if need_to > 0:
+        peak = _week_turnover_peak(df, q)
+        if peak < need_to:
+            return None
+        extra_tags.append("近一周换手活跃")
+        extra_notes.append(
+            f"近一周最大单日换手约 {peak:.1f}%，满足 >{need_to:.0f}%")
     try:
         ctx = precompute(df, q["price"], q.get("total_mv") or 0)
         rules = STRATEGIES[strategy]["builder"](ctx, code)
@@ -825,6 +872,7 @@ def _analyze_strict(code: str, q: dict, strategy: str,
         "signal": len(failed) == 0, "strategy": strategy,
         "pass_count": len(passed), "total": len(rules),
         "passed": passed, "failed": failed, "mode": "strict",
+        "extra_tags": extra_tags, "extra_notes": extra_notes,
     }
 
 

@@ -487,7 +487,26 @@ class MarketInfoPage(QWidget):
         self._fill_news()
 
     # ---------------- 完整渲染 ----------------
+    _SNAP_FIELDS = ("indices", "limit_up", "sectors", "em_industry_boards",
+                    "em_concept_boards", "news", "news_sources", "lhb",
+                    "northbound", "hot_concepts", "rotation", "sentiment")
+
+    def _merge_snapshot(self, new, old):
+        """新快照优先覆盖旧快照；仅当某数据源本次未返回时才沿用上次，避免界面变空。"""
+        if old is None or getattr(new, "from_cache", False):
+            return new, []
+        reused = []
+        for f in self._SNAP_FIELDS:
+            if not getattr(new, f, None) and getattr(old, f, None):
+                setattr(new, f, getattr(old, f))
+                reused.append(f)
+        if reused:
+            msg = "部分数据源未返回，已沿用上次数据：" + "、".join(reused)
+            new.errors = list(getattr(new, "errors", []) or []) + [msg]
+        return new, reused
+
     def _on_done(self, snap):
+        snap, self._reused = self._merge_snapshot(snap, self._snap)
         self._snap = snap
         self._news_cache = snap.news
         if not getattr(snap, "from_cache", False):
@@ -523,6 +542,8 @@ class MarketInfoPage(QWidget):
 
         src_tag = "【本地缓存】" if getattr(snap, "from_cache", False) \
             else "【实时数据】"
+        if getattr(self, "_reused", None):
+            src_tag += "（部分区块沿用上次）"
         srcs = getattr(snap, "news_sources", []) or []
         src_txt = f" · 新闻源 {len(srcs)} 家" if srcs else ""
         self.asof_lbl.setText(

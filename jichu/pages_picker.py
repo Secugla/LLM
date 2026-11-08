@@ -38,14 +38,14 @@ SCOPE_KEYS = [("all", "全部A股"), ("main", "沪深主板"),
               ("gem", "创业板"), ("star", "科创板"), ("bj", "北交所")]
 MAX_KEYS = [(200, "200 只（较快）"), (400, "400 只（推荐）"),
             (600, "600 只"), (800, "800 只"), (0, "全部（较慢）")]
-# 总市值预设（下限, 上限，单位亿元）：覆盖微盘到超大盘，默认全市场保证有标的
-MV_KEYS = [(20, 3000, "全市场 20~3000 亿"),
-           (20, 200, "中小盘 20~200 亿"),
-           (50, 500, "中盘 50~500 亿"),
-           (100, 1000, "大盘 100~1000 亿"),
-           (10, 80, "微盘活跃 10~80 亿"),
-           (500, 3000, "超大盘 500~3000 亿"),
-           (0, 10000, "不限 0~10000 亿")]
+# 总市值预设（下限, 上限, 说明, 近一周最低换手峰值），单位亿元
+# 「微盘活跃」额外要求近一周存在单日换手 > 8%
+MV_KEYS = [(0, 40, "小盘（<40 亿）", 0.0),
+           (20, 80, "中小盘（20~80 亿）", 0.0),
+           (80, 500, "中盘（80~500 亿）", 0.0),
+           (300, 10000, "大盘（>300 亿）", 0.0),
+           (0, 10000, "全市场（全部股票）", 0.0),
+           (0, 90, "微盘活跃（<90 亿，近一周换手>8%）", 8.0)]
 # 最低形态命中：1 宽松（结果多）、2 推荐、3 严格（结果少）
 MIN_TAG_KEYS = [(1, "1 个（宽松）"), (2, "2 个（推荐）"), (3, "3 个（严格）")]
 
@@ -87,9 +87,9 @@ class PickerPage(QWidget):
         row1.addSpacing(10)
         row1.addWidget(QLabel("总市值"))
         self.mv_cb = QComboBox()
-        self.mv_cb.addItems([n for _, _, n in MV_KEYS])
-        self.mv_cb.setCurrentIndex(0)
-        self.mv_cb.setMinimumWidth(170)
+        self.mv_cb.addItems([n for _, _, n, _ in MV_KEYS])
+        self.mv_cb.setCurrentIndex(4)          # 默认全市场
+        self.mv_cb.setMinimumWidth(220)
         self.mv_cb.setToolTip("预设市值区间：选择后自动对应区间下限与上限")
         row1.addWidget(self.mv_cb)
 
@@ -219,10 +219,11 @@ class PickerPage(QWidget):
     # ---------------- 扫描 ----------------
     def _config(self) -> dict:
         max_n = MAX_KEYS[self.max_cb.currentIndex()][0]
-        mv_min, mv_max, _ = MV_KEYS[self.mv_cb.currentIndex()]
+        mv_min, mv_max, _, min_turn = MV_KEYS[self.mv_cb.currentIndex()]
         return {
             "min_mv": mv_min,
             "max_mv": mv_max,
+            "require_recent_turnover": min_turn,
             "scope": SCOPE_KEYS[self.scope_cb.currentIndex()][0],
             "max_candidates": max_n,
             "min_tags": MIN_TAG_KEYS[self.min_tags_cb.currentIndex()][0],
@@ -402,6 +403,12 @@ class PickerPage(QWidget):
         if daily or weekly:
             html += f"<b>日线形态：</b>{'、'.join(daily) if daily else '无'}<br>"
             html += f"<b>周线形态：</b>{'、'.join(weekly) if weekly else '无'}<br><br>"
+
+        ex_notes = r.get("extra_notes") or []
+        if ex_notes:
+            html += (f"<b>额外筛选：</b>"
+                     f"<span style='color:{WARN}'>{'；'.join(ex_notes)}</span>"
+                     f"<br><br>")
 
         if r.get("details"):
             html += f"<b>形态命中依据：</b><br>"
