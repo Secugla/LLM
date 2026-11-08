@@ -127,6 +127,10 @@ class BacktestPage(QWidget):
             QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.mode.setMinimumContentsLength(12)
         self.mode.currentIndexChanged.connect(self._on_mode)
+        # 默认启动即「全市场组合（多因子）」；此处只切换索引，_on_mode 在构建末尾统一调用
+        self.mode.blockSignals(True)
+        self.mode.setCurrentIndex(1)
+        self.mode.blockSignals(False)
 
         self.strategy = QComboBox()
         self.strategy.setMinimumWidth(220)
@@ -163,13 +167,13 @@ class BacktestPage(QWidget):
         row2 = QHBoxLayout()
         row2.setSpacing(10)
         self.neutral_cb = QCheckBox("行业/市值中性化")
-        self.neutral_cb.setChecked(True)
+        self.neutral_cb.setChecked(False)
         self.neutral_cb.setToolTip("全市场模式：先行业内排分位，再剔除市值暴露")
         self.exec_cb = QCheckBox("涨跌停/停牌约束")
-        self.exec_cb.setChecked(True)
+        self.exec_cb.setChecked(False)
         self.exec_cb.setToolTip("涨停不追买、跌停不砸卖，并按成交量 5% 限额与冲击成本")
         self.fund_cb = QCheckBox("资金面增强（龙虎榜+北向+席位）")
-        self.fund_cb.setChecked(True)
+        self.fund_cb.setChecked(False)
         self.fund_cb.setToolTip("龙虎榜净买额占流通市值 + 北向成交额占比，"
                                "并按上榜席位历史胜率调整，以 15% 权重叠加到总分")
         row2.addWidget(self.neutral_cb)
@@ -229,7 +233,7 @@ class BacktestPage(QWidget):
         self.pool = QComboBox()
         for n in (20, 50, 100, 400):
             self.pool.addItem(f"{n} 只", n)
-        self.pool.setCurrentIndex(3)      # 默认 400 只
+        self.pool.setCurrentIndex(2)      # 默认 100 只（主流宽基池）
         self.pool.setFixedWidth(92)
         self.pool.setToolTip("股票池上限：按成交额（流动性）从高到低取前 N 只，"
                              "不同池容量对应不同的选股思路")
@@ -237,7 +241,7 @@ class BacktestPage(QWidget):
         self.topn = QComboBox()
         for n in (5, 10, 20):
             self.topn.addItem(f"{n} 只", n)
-        self.topn.setCurrentIndex(2)      # 默认 20 只
+        self.topn.setCurrentIndex(0)      # 默认 5 只
         self.topn.setFixedWidth(88)
         self.topn.setToolTip("同时持有的股票数量；数量越少越集中")
         self.rebal = QComboBox()
@@ -250,7 +254,7 @@ class BacktestPage(QWidget):
         self.pool_pos = QComboBox()
         for p in (50, 60, 80, 100):
             self.pool_pos.addItem(f"{p} %", p)
-        self.pool_pos.setCurrentIndex(2)  # 默认 80%
+        self.pool_pos.setCurrentIndex(3)  # 默认 100%
         self.pool_pos.setFixedWidth(88)
         self.pool_pos.setToolTip("组合总仓位上限；留出的现金用于加仓或应对回调")
         for lab, w in [("股票池上限", self.pool), ("持仓数", self.topn),
@@ -263,15 +267,16 @@ class BacktestPage(QWidget):
         mh = QHBoxLayout()
         mh.setSpacing(10)
         self.price_cb = QCheckBox("剔除股价 > 60 元")
-        self.price_cb.setChecked(True)
-        self.price_cb.setToolTip("高价股波动与资金占用大，默认从股票池剔除")
+        self.price_cb.setChecked(False)
+        self.price_cb.setToolTip("勾选后从股票池剔除高价股（波动与资金占用较大）")
         self.multi_hint = QLabel("")
         self.multi_hint.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
         self.multi_hint.setWordWrap(True)
         mh.addWidget(self.price_cb)
         mh.addWidget(self.multi_hint, 1)
         mv.addLayout(mh)
-        self._on_pool_change()
+        # 首次只刷新说明文案，持仓数保持截图默认的 5 只（用户改池容量时再自动联动）
+        self._on_pool_change(sync_topn=False)
 
         # 战法模式参数
         tactic = QFrame()
@@ -444,13 +449,15 @@ class BacktestPage(QWidget):
         if idx is not None:
             self.tabs.setCurrentIndex(int(idx))
 
-    def _on_pool_change(self, _=None):
+    def _on_pool_change(self, _=None, sync_topn: bool = True):
         """股票池容量变化：同步更新选股方式说明，并给出匹配的默认持仓数。"""
-        n = int(self.pool.currentData() or 400)
-        name, desc = POOL_MODE.get(n, POOL_MODE[400])
+        n = int(self.pool.currentData() or 100)
+        name, desc = POOL_MODE.get(n, POOL_MODE[100])
         self.multi_hint.setText(
             f"选股方式：{name}（{n} 只）—— {desc}；调仓日按多因子排名生成目标名单，"
             "次日开盘等权建仓，非调仓日只做止损")
+        if not sync_topn:
+            return
         idx = self.topn.findData(POOL_DEFAULT_TOP_N.get(n, 20))
         if idx >= 0:
             self.topn.setCurrentIndex(idx)
