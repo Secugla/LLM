@@ -36,8 +36,8 @@ STRATEGY_KEYS = [
 ]
 SCOPE_KEYS = [("all", "全部A股"), ("main", "沪深主板"),
               ("gem", "创业板"), ("star", "科创板"), ("bj", "北交所")]
-MAX_KEYS = [(200, "200 只（较快）"), (400, "400 只（推荐）"),
-            (600, "600 只"), (800, "800 只"), (0, "全部（较慢）")]
+MAX_KEYS = [(50, "50 只（更快）"), (100, "100 只（推荐）"),
+            (200, "200 只（较多）")]
 # 总市值预设（下限, 上限, 说明, 近一周最低换手峰值），单位亿元
 # 「微盘活跃」额外要求近一周存在单日换手 > 8%
 MV_KEYS = [(0, 40, "小盘（<40 亿）", 0.0),
@@ -107,6 +107,9 @@ class PickerPage(QWidget):
         self.max_cb = QComboBox()
         self.max_cb.addItems([n for _, n in MAX_KEYS])
         self.max_cb.setCurrentIndex(1)
+        self.max_cb.setToolTip(
+            "按成交额从高到低排序后只精筛前 N 只候选股（不是命中数量）；"
+            "数值越大越慢，命中结果仍会把全部候选扫描完")
         row2.addWidget(self.max_cb)
         row2.addSpacing(10)
         row2.addWidget(QLabel("最低形态命中"))

@@ -653,7 +653,7 @@ DEFAULT_CONFIG = {
     "price_max": 300.0,
     "min_amount": 0.5,       # 成交额下限（亿元）
     "scope": "all",          # all/main/gem/star/bj
-    "max_candidates": 400,   # 0 = 全部（可能较慢）
+    "max_candidates": 100,   # 按成交额排序后精筛的候选数（0 = 全部，可能较慢）
     "min_tags": 2,           # 形态组合模式最低命中标签数
     "require_recent_turnover": 0.0,  # 近一周需出现的最低单日换手（%，0=不要求）
     "workers": 10,
@@ -668,7 +668,7 @@ def _normalize_config(cfg: Optional[dict]) -> dict:
     c.update(cfg or {})
     c["min_mv"] = max(0.0, float(c.get("min_mv", 30)))
     c["max_mv"] = max(c["min_mv"], float(c.get("max_mv", 3000)))
-    c["max_candidates"] = max(0, int(c.get("max_candidates", 400)))
+    c["max_candidates"] = max(0, int(c.get("max_candidates", 100)))
     c["min_tags"] = max(1, int(c.get("min_tags", 2)))
     c["require_recent_turnover"] = max(
         0.0, float(c.get("require_recent_turnover", 0.0) or 0.0))
@@ -677,10 +677,10 @@ def _normalize_config(cfg: Optional[dict]) -> dict:
 
 
 def _week_turnover_peak(df, q: dict) -> float:
-    """估算近一周（最近 5 个交易日）单日换手率峰值。
+    """近一周（最近 5 个交易日）的单日换手率峰值。
 
-    用当日成交额/换手率反推流通股本，再换算近几日成交量对应的换手率；
-    数据不足时退化为当日换手率。
+    日线只含成交量（股），用「当日成交量 / 当日换手率」反推流通股本，
+    再把近几日成交量折算成换手率；最后与当日实时换手率取较大值。
     """
     t_today = float(q.get("turnover") or 0)
     try:
@@ -690,7 +690,7 @@ def _week_turnover_peak(df, q: dict) -> float:
             if v_last > 0:
                 shares = v_last / (t_today / 100.0)
                 if shares > 0:
-                    peak = float((vols.tail(6) / shares * 100).max())
+                    peak = float((vols.tail(5) / shares * 100).max())
                     return max(peak, t_today)
     except Exception:
         pass
