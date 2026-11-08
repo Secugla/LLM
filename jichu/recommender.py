@@ -732,8 +732,23 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
             morning=morning,
         ))
 
+    # 弱市收紧：情绪低迷或涨跌宽度过差时，提高入选门槛并减少推荐数量，
+    # 这是针对回测中「最大回撤偏大、胜率不足 50%」的主要风险点做的保护
+    eff_min_score = min_score
+    top_eff = top_n
+    weak_mood = (ctx.get("temperature", 50) <= 35
+                 or ctx.get("up_ratio", 0.5) < 0.30)
+    if weak_mood:
+        eff_min_score += 6
+        top_eff = max(5, top_n // 2)
+        notes.append(
+            f"弱市模式：情绪 {ctx.get('temperature', 50):.0f}、"
+            f"上涨占比 {ctx.get('up_ratio', 0.5):.0%}，"
+            f"入选门槛上调 6 分、推荐数量减半以控制回撤")
+
     # 硬门槛：综合分过低且无任何题材/轮动支撑的不推荐（避免凑数）
-    picks = [p for p in picks if p.score >= min_score or p.leader_flag.endswith("龙头")]
+    picks = [p for p in picks
+             if p.score >= eff_min_score or p.leader_flag.endswith("龙头")]
     picks.sort(key=lambda p: (p.score, p.factor_scores.get("rotation", 0)),
                reverse=True)
 
@@ -747,7 +762,7 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
         filtered.append(p)
     picks = filtered
 
-    top = picks[:top_n]
+    top = picks[:top_eff]
     for i, p in enumerate(top, 1):
         p.rank = i
 
