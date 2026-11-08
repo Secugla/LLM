@@ -146,6 +146,8 @@ class MarketSnapshot:
     news_sources: List[str] = field(default_factory=list)
     sentiment: dict = field(default_factory=dict)
     rotation: List[dict] = field(default_factory=list)
+    lhb: List[dict] = field(default_factory=list)
+    northbound: dict = field(default_factory=dict)
     sources: dict = field(default_factory=dict)
     from_cache: bool = False
     errors: List[str] = field(default_factory=list)
@@ -938,15 +940,501 @@ def sentiment_temperature(stocks: List[LimitUpStock], dt_count: int,
 
 
 # ============================================================
-#  统一刷新入口：流式（各区块完成即回调）
+#  资金面：龙虎榜 + 北向资金（东财数据中心公开报表）
 # ============================================================
+_DATACENTER = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+
+
+def _dc_rows(report: str, **params) -> list:
+    """东财数据中心通用查询；调用方负责降级处理。"""
+    p = {"reportName": report, "columns": "ALL", "source": "WEB",
+         "client": "WEB", "pageSize": "50", "pageNumber": "1"}
+    p.update({k: v for k, v in params.items() if v is not None})
+    r = _retry_get(_DATACENTER, params=p, timeout=10, retries=1)
+    j = r.json()
+    if j.get("success") is False:
+        raise RuntimeError(str(j.get("message") or "数据中心返回失败"))
+    return ((j.get("result") or {}).get("data")) or []
+
+
+def _fnum(v) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+def _dash(d: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD（已是带横线格式则原样返回）。"""
+    d = str(d or "")
+    if len(d) == 8 and d.isdigit():
+        return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    return d
+
+
+def fetch_lhb(date: Optional[str] = None, limit: int = 40) -> dict:
+    """龙虎榜：按净买额降序，同一只票的多个上榜原因合并。
+
+    东财报表为收盘后更新，当天未出数据时自动回退到前一个交易日。
+    """
+    candidates = [_dash(date)] if date else \
+        [_dash(x) for x in recent_trade_dates(3)]
+    rows, used = [], ""
+    for d in candidates:
+        try:
+            rows = _dc_rows("RPT_DAILYBILLBOARD_DETAILSNEW",
+                            sortColumns="BILLBOARD_NET_AMT,SECURITY_CODE",
+                            sortTypes="-1,1",
+                            filter=f"(TRADE_DATE='{d}')")
+        except Exception:
+            rows = []
+        if rows:
+            used = d
+            break
+    merged = {}
+    for x in rows:
+        code = str(x.get("SECURITY_CODE") or "")
+        if not code:
+            continue
+        buy = _fnum(x.get("BILLBOARD_BUY_AMT"))
+        sell = _fnum(x.get("BILLBOARD_SELL_AMT"))
+        reason = str(x.get("EXPLANATION") or "").strip()
+        if code in merged:
+            if reason and reason not in merged[code]["reasons"]:
+                merged[code]["reasons"].append(reason)
+            continue
+        merged[code] = {
+            "code": code,
+            "name": x.get("SECURITY_NAME_ABBR") or "",
+            "price": _fnum(x.get("CLOSE_PRICE")),
+            "change_pct": _fnum(x.get("CHANGE_RATE")),
+            "net_buy": _fnum(x.get("BILLBOARD_NET_AMT")) or (buy - sell),
+            "buy_amt": buy,
+            "sell_amt": sell,
+            "amount": _fnum(x.get("BILLBOARD_DEAL_AMT")),
+            "turnover": _fnum(x.get("TURNOVERRATE")),
+            "reasons": [reason] if reason else [],
+            "date": used,
+        }
+    items = sorted(merged.values(), key=lambda v: v["net_buy"], reverse=True)
+    return {"date": used, "rows": items[:limit], "count": len(items)}
+
+
+def fetch_north_market(date: str) -> dict:
+    """单日北向（沪股通+深股通）成交额，单位元。
+
+    东财 RPT_MUTUAL_DEAL_HISTORY 的 DEAL_AMT 以百万元计，这里换算成元。
+    MUTUAL_TYPE：001 沪股通、003 深股通、005 北向合计。
+    """
+    d = _dash(date)
+    try:
+        rows = _dc_rows("RPT_MUTUAL_DEAL_HISTORY",
+                        filter=f"(TRADE_DATE='{d}')",
+                        sortColumns="MUTUAL_TYPE", sortTypes="1")
+    except Exception:
+        rows = []
+    m = {str(x.get("MUTUAL_TYPE") or ""): _fnum(x.get("DEAL_AMT"))
+         for x in rows}
+    sh = m.get("001", 0.0) * 1e6
+    sz = m.get("003", 0.0) * 1e6
+    total = m.get("005", 0.0) * 1e6 or (sh + sz)
+    return {"date": d, "sh": sh, "sz": sz, "total": total}
+
+
+def fetch_northbound(date: Optional[str] = None, limit: int = 20) -> dict:
+    """北向资金：每日净买额自 2024-08-19 起停止披露。
+
+    仍可用的口径是「北向十大成交股」的成交额，按成交额降序展示；
+    净买额字段保留但通常为空，界面统一显示为“暂停披露”。
+    """
+    candidates = [_dash(date)] if date else \
+        [_dash(x) for x in recent_trade_dates(3)]
+    rows, used = [], ""
+    for d in candidates:
+        try:
+            rows = _dc_rows("RPT_MUTUAL_TOP10DEAL",
+                            filter=f"(TRADE_DATE='{d}')",
+                            sortColumns="DEAL_AMT", sortTypes="-1")
+        except Exception:
+            rows = []
+        if rows:
+            used = d
+            break
+    out = []
+    for x in rows:
+        mt = str(x.get("MUTUAL_TYPE") or "")
+        if mt not in ("001", "003"):  # 001 沪股通 / 003 深股通
+            continue
+        out.append({
+            "market": "沪股通" if mt == "001" else "深股通",
+            "code": str(x.get("SECURITY_CODE") or ""),
+            "name": x.get("SECURITY_NAME") or "",
+            "change_pct": _fnum(x.get("CHANGE_RATE")),
+            "deal_amt": _fnum(x.get("DEAL_AMT")),
+            "net_buy": _fnum(x.get("NET_BUY_AMT")),
+            "rank": int(_fnum(x.get("RANK")) or 0),
+        })
+    out.sort(key=lambda v: v["deal_amt"], reverse=True)
+    market = fetch_north_market(used) if used else {}
+    return {"date": used, "rows": out[:limit], "market": market,
+            "note": "北向每日净买额自 2024-08-19 起停止披露，"
+                    "本表按十大成交股成交额排序"}
+
+
+# ============================================================
+#  资金面区间数据（供回测/因子使用，按日期缓存）
+# ============================================================
+_FUND_MEM: dict = {}
+_PAGE_SIZE = 500  # 东财数据中心单页上限
+
+
+def _dc_page(report: str, page: int, flt: str, sort_cols: str,
+             sort_types: str, page_size: int = _PAGE_SIZE) -> tuple:
+    """取一页数据，返回 (rows, total_pages)。"""
+    p = {"reportName": report, "columns": "ALL", "source": "WEB",
+         "client": "WEB", "pageSize": str(page_size),
+         "pageNumber": str(page), "sortColumns": sort_cols,
+         "sortTypes": sort_types}
+    if flt:
+        p["filter"] = flt
+    r = _retry_get(_DATACENTER, params=p, timeout=15, retries=1)
+    j = r.json()
+    if j.get("success") is False:
+        raise RuntimeError(str(j.get("message") or "数据中心返回失败"))
+    res = j.get("result") or {}
+    return (res.get("data") or []), int(res.get("pages") or 0)
+
+
+def _dc_all_pages(report: str, flt: str, sort_cols: str, sort_types: str,
+                  max_pages: int = 90, workers: int = 6) -> list:
+    """并发抓完所有分页。"""
+    rows, pages = _dc_page(report, 1, flt, sort_cols, sort_types)
+    total = list(rows)
+    pages = min(pages, max_pages)
+    if pages > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(_dc_page, report, pg, flt, sort_cols,
+                              sort_types) for pg in range(2, pages + 1)]
+            for fu in futs:
+                try:
+                    total.extend(fu.result()[0])
+                except Exception:
+                    continue
+    return total
+
+
+def fetch_lhb_range(start: str, end: str) -> dict:
+    """抓取区间内龙虎榜，返回 {日期: {代码: 净买额}}。
+
+    同一只票同一天可能有多条上榜原因，取其中净买额最大的一条。
+    """
+    flt = f"(TRADE_DATE>='{start}')(TRADE_DATE<='{end}')"
+    rows = _dc_all_pages("RPT_DAILYBILLBOARD_DETAILSNEW", flt,
+                         "TRADE_DATE,SECURITY_CODE", "1,1")
+    out: dict = {}
+    for x in rows:
+        d = str(x.get("TRADE_DATE") or "")[:10]
+        code = str(x.get("SECURITY_CODE") or "")
+        if not d or not code:
+            continue
+        buy = _fnum(x.get("BILLBOARD_BUY_AMT"))
+        sell = _fnum(x.get("BILLBOARD_SELL_AMT"))
+        net = _fnum(x.get("BILLBOARD_NET_AMT")) or (buy - sell)
+        slot = out.setdefault(d, {})
+        if net > slot.get(code, -1e18):
+            slot[code] = net
+    return out
+
+
+def fetch_north_range(start: str, end: str) -> dict:
+    """抓取区间内北向十大成交股成交额，返回 {日期: {代码: 成交额}}。"""
+    flt = f"(TRADE_DATE>='{start}')(TRADE_DATE<='{end}')"
+    rows = _dc_all_pages("RPT_MUTUAL_TOP10DEAL", flt,
+                         "TRADE_DATE,MUTUAL_TYPE,RANK", "1,1,1")
+    out: dict = {}
+    for x in rows:
+        # 001 沪股通 / 003 深股通（北向）；002/004 为南向，剔除
+        if str(x.get("MUTUAL_TYPE") or "") not in ("001", "003"):
+            continue
+        d = str(x.get("TRADE_DATE") or "")[:10]
+        code = str(x.get("SECURITY_CODE") or "")
+        if not d or len(code) != 6:
+            continue
+        amt = _fnum(x.get("DEAL_AMT"))
+        slot = out.setdefault(d, {})
+        slot[code] = slot.get(code, 0.0) + amt
+    return out
+
+
+def fund_flow_range(start: str, end: str,
+                    progress: Optional[Callable[[str], None]] = None,
+                    ttl_hours: float = 6.0) -> dict:
+    """区间龙虎榜 + 北向成交额，带内存与磁盘缓存。
+
+    返回 {"lhb": {日期: {代码: 净买额}}, "north": {日期: {代码: 成交额}},
+          "ok": {"lhb": bool, "north": bool}, "start", "end"}
+    """
+    log = progress or (lambda s: None)
+    key = f"{start}_{end}"
+    if key in _FUND_MEM:
+        return _FUND_MEM[key]
+    path = os.path.join(CACHE_DIR, f"fund_flow_{start}_{end}.json")
+    data = None
+    if os.path.exists(path):
+        try:
+            if time.time() - os.path.getmtime(path) < ttl_hours * 3600:
+                with open(path, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+        except Exception:
+            data = None
+    if data is None:
+        log("抓取龙虎榜区间数据…")
+        try:
+            lhb = fetch_lhb_range(start, end)
+            ok_lhb = True
+        except Exception:
+            lhb, ok_lhb = {}, False
+        log("抓取北向十大成交股区间数据…")
+        try:
+            north = fetch_north_range(start, end)
+            ok_north = True
+        except Exception:
+            north, ok_north = {}, False
+        data = {"lhb": lhb, "north": north,
+                "ok": {"lhb": ok_lhb, "north": ok_north},
+                "start": start, "end": end}
+        try:
+            with open(path, "w", encoding="utf-8") as fp:
+                json.dump(data, fp, ensure_ascii=False)
+        except Exception:
+            pass
+    _FUND_MEM[key] = data
+    return data
+
+
+# ============================================================
+#  龙虎榜席位（游资）画像
+# ============================================================
+_SEAT_QUAL_FILE = os.path.join(CACHE_DIR, "seat_quality.json")
+_ALIAS_FILE = os.path.join(CACHE_DIR, "seat_alias.json")
+_SEAT_MEM: dict = {}
+
+# 常见席位别名（社区叫法，仅供参考，可在 seat_alias.json 自行修改）
+_DEFAULT_ALIAS = {
+    "华鑫证券有限责任公司上海分公司": "华鑫上海（游资/量化混合）",
+    "东方财富证券股份有限公司拉萨团结路第二证券营业部": "拉萨天团（散户集中营）",
+    "东方财富证券股份有限公司拉萨团结路第一证券营业部": "拉萨天团（散户集中营）",
+    "东方财富证券股份有限公司拉萨东环路第二证券营业部": "拉萨天团（散户集中营）",
+    "东方财富证券股份有限公司拉萨东环路第一证券营业部": "拉萨天团（散户集中营）",
+    "东方财富证券股份有限公司拉萨金融城南环路证券营业部": "拉萨天团（散户集中营）",
+    "东方财富证券股份有限公司拉萨北京中路证券营业部": "拉萨天团（散户集中营）",
+    "中国银河证券股份有限公司绍兴证券营业部": "绍兴帮",
+    "国盛证券有限责任公司宁波桑田路证券营业部": "宁波桑田路",
+    "华泰证券股份有限公司厦门厦禾路证券营业部": "厦门厦禾路",
+    "华泰证券股份有限公司深圳益田路荣超商务中心证券营业部": "深圳益田路",
+    "中信证券股份有限公司上海溧阳路证券营业部": "溧阳路",
+    "中信证券股份有限公司上海分公司": "中信上海（机构/游资混合）",
+    "财通证券股份有限公司杭州上塘路证券营业部": "杭州上塘路",
+    "光大证券股份有限公司佛山绿景路证券营业部": "佛山系",
+    "国泰君安证券股份有限公司南京太平南路证券营业部": "南京太平南路",
+    "国泰君安证券股份有限公司上海江苏路证券营业部": "上海江苏路",
+    "招商证券股份有限公司深圳蛇口工业七路证券营业部": "蛇口系",
+    "高盛(中国)证券有限责任公司上海浦东新区世纪大道证券营业部": "外资（量化）",
+    "瑞银证券有限责任公司上海花园石桥路证券营业部": "外资（量化）",
+    "摩根大通证券(中国)有限公司上海银城中路证券营业部": "外资（量化）",
+    "摩根士丹利证券(中国)有限公司上海环贸广场证券营业部": "外资（量化）",
+    "机构专用": "机构专用",
+}
+
+
+def _norm_seat(name: str) -> str:
+    """席位名归一化：去掉公司后缀与空格，便于跨报表匹配。"""
+    s = str(name or "")
+    for token in ("股份有限公司", "有限责任公司", "有限公司", "证券营业部", "营业部", " ", "　"):
+        s = s.replace(token, "")
+    return s
+
+
+def seat_alias_of(name: str, alias: Optional[dict] = None) -> str:
+    """按别名表解析席位昵称；支持全称/简称、后缀差异的模糊匹配。"""
+    table = alias if alias is not None else load_seat_alias()
+    if not table:
+        return ""
+    hit = table.get(name)
+    if hit:
+        return hit
+    nk = _norm_seat(name)
+    for k, v in table.items():
+        kn = _norm_seat(k)
+        if not kn:
+            continue
+        if kn == nk or (len(kn) >= 6 and (kn in nk or nk in kn)):
+            return v
+    return ""
+
+
+def load_seat_alias() -> dict:
+    """加载席位别名映射；不存在时写入默认表，并把新增默认项合并进已有文件。"""
+    data = {}
+    try:
+        if os.path.exists(_ALIAS_FILE):
+            with open(_ALIAS_FILE, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if not isinstance(data, dict):
+                data = {}
+    except Exception:
+        data = {}
+    merged = dict(_DEFAULT_ALIAS)
+    merged.update(data)  # 用户已有配置优先
+    if merged != data:
+        try:
+            with open(_ALIAS_FILE, "w", encoding="utf-8") as fp:
+                json.dump(merged, fp, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return merged
+
+
+def _seat_quality(prob, samples, min_n: int = 5) -> float:
+    """席位质量 0..1：用历史“上榜后3日上涨概率”映射，样本不足给中性 0.5。"""
+    try:
+        p = float(prob)
+        n = int(samples or 0)
+    except Exception:
+        return 0.5
+    if n < min_n:
+        return 0.5
+    return max(0.0, min(1.0, (p - 25.0) / 50.0))
+
+
+def fetch_lhb_seats(date: Optional[str] = None,
+                    max_pages: int = 4) -> dict:
+    """某交易日龙虎榜席位明细，返回 {代码: {buys, sells, quality}}。
+
+    quality ∈ [-1, 1]：买入席位平均质量 − 卖出席位平均质量（按金额加权）。
+    """
+    d = _dash(date) if date else fetch_lhb()["date"]
+    if d in _SEAT_MEM:
+        return _SEAT_MEM[d]
+    out: dict = {}
+    try:
+        buys = _dc_all_pages("RPT_BILLBOARD_DAILYDETAILSBUY",
+                             f"(TRADE_DATE='{d}')",
+                             "SECURITY_CODE,BUY", "-1,-1",
+                             max_pages=max_pages)
+        sells = _dc_all_pages("RPT_BILLBOARD_DAILYDETAILSSELL",
+                              f"(TRADE_DATE='{d}')",
+                              "SECURITY_CODE,SELL", "-1,-1",
+                              max_pages=max_pages)
+    except Exception:
+        buys, sells = [], []
+
+    def _add(rows, side):
+        for x in rows:
+            code = str(x.get("SECURITY_CODE") or "")
+            if not code:
+                continue
+            slot = out.setdefault(code, {"buys": [], "sells": []})
+            slot[side].append({
+                "seat": str(x.get("OPERATEDEPT_NAME") or ""),
+                "code": str(x.get("OPERATEDEPT_CODE") or ""),
+                "amount": _fnum(x.get("BUY") if side == "buys"
+                                else x.get("SELL")),
+                "net": _fnum(x.get("NET")),
+                "reason": str(x.get("EXPLANATION") or ""),
+                "prob3": x.get("RISE_PROBABILITY_3DAY"),
+                "samples": x.get("TOTAL_BUYER_SALESTIMES_3DAY"),
+            })
+
+    _add(buys, "buys")
+    _add(sells, "sells")
+
+    for code, slot in out.items():
+        bw = sum(b["amount"] for b in slot["buys"])
+        sw = sum(s["amount"] for s in slot["sells"])
+        bq = sum(b["amount"] * _seat_quality(b["prob3"], b["samples"])
+                 for b in slot["buys"]) / bw if bw > 0 else 0.5
+        sq = sum(s["amount"] * _seat_quality(s["prob3"], s["samples"])
+                 for s in slot["sells"]) / sw if sw > 0 else 0.5
+        slot["quality"] = round(float(bq - sq), 3)
+        for side in ("buys", "sells"):
+            slot[side].sort(key=lambda v: v["amount"], reverse=True)
+            slot[side] = slot[side][:5]
+    _SEAT_MEM[d] = out
+    return out
+
+
+def seat_quality_range(dates: list, progress: Optional[Callable[[str], None]] = None,
+                       workers: int = 6) -> dict:
+    """按交易日并发抓取席位质量，返回 {日期: {代码: quality}}，带磁盘缓存。"""
+    log = progress or (lambda s: None)
+    cache = {}
+    try:
+        if os.path.exists(_SEAT_QUAL_FILE):
+            with open(_SEAT_QUAL_FILE, "r", encoding="utf-8") as fp:
+                cache = json.load(fp)
+    except Exception:
+        cache = {}
+    todo = [d for d in dict.fromkeys(dates) if d not in cache]
+    if todo:
+        log(f"抓取 {len(todo)} 个交易日的龙虎榜席位…")
+
+        def _one(day):
+            try:
+                seats = fetch_lhb_seats(day)
+                return day, {c: float(v.get("quality", 0.0))
+                             for c, v in seats.items()}
+            except Exception:
+                return day, {}
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for day, val in ex.map(_one, todo):
+                cache[day] = val
+        try:
+            with open(_SEAT_QUAL_FILE, "w", encoding="utf-8") as fp:
+                json.dump(cache, fp, ensure_ascii=False)
+        except Exception:
+            pass
+    return {d: cache.get(d, {}) for d in dates}
+
+
+def fetch_seat_rank(limit: int = 200, cycle: str = "04") -> list:
+    """营业部（游资席位）排行：上榜次数 + 上榜后 1/3/5/10 日平均涨幅与胜率。"""
+    rows = _dc_all_pages("RPT_RATEDEPT_RETURNT_RANKING", "",
+                         "TOTAL_BUYER_SALESTIMES_5DAY", "-1",
+                         max_pages=12)
+    picked = [x for x in rows
+              if str(x.get("STATISTICSCYCLE") or "") == cycle] or rows
+    out = []
+    alias = load_seat_alias()
+    for x in picked:
+        name = str(x.get("OPERATEDEPT_NAME") or "")
+        if "营业部" not in name and name != "机构专用":
+            continue  # 过滤沪深股通专用/合并口径等非营业部席位
+        out.append({
+            "seat": name,
+            "alias": seat_alias_of(name, alias),
+            "code": str(x.get("OPERATEDEPT_CODE") or ""),
+            "n1": int(_fnum(x.get("TOTAL_BUYER_SALESTIMES_1DAY"))),
+            "n5": int(_fnum(x.get("TOTAL_BUYER_SALESTIMES_5DAY"))),
+            "avg1": round(_fnum(x.get("AVERAGE_INCREASE_1DAY")), 2),
+            "avg3": round(_fnum(x.get("AVERAGE_INCREASE_3DAY")), 2),
+            "avg5": round(_fnum(x.get("AVERAGE_INCREASE_5DAY")), 2),
+            "avg10": round(_fnum(x.get("AVERAGE_INCREASE_10DAY")), 2),
+            "prob5": round(_fnum(x.get("RISE_PROBABILITY_5DAY")), 1),
+        })
+    out.sort(key=lambda v: (v["n5"], v["avg5"]), reverse=True)
+    return out[:limit]
+
+
 def refresh_all_stream(progress: Optional[Callable[[str], None]] = None,
                        date: Optional[str] = None,
                        emit: Optional[Callable[[str, object], None]] = None,
                        force: bool = False, budget: float = 30.0):
     """
     抓取并返回完整市场快照，同时通过 emit(stage, payload) 流式回调：
-      indices / limit_up / sectors / boards / news / hot / rotation
+      indices / limit_up / sectors / boards / news / hot / rotation /
+      lhb / north
     界面先展示缓存，再按区块逐个填充；总预算 budget 秒，超时任务跳过。
     """
     def log(msg):
@@ -981,6 +1469,8 @@ def refresh_all_stream(progress: Optional[Callable[[str], None]] = None,
             ex.submit(fetch_em_industry_boards): "em_ind",
             ex.submit(fetch_em_concept_boards): "em_con",
             ex.submit(fetch_all_news, 50, force): "news",
+            ex.submit(fetch_lhb, date): "lhb",
+            ex.submit(fetch_northbound, date): "north",
         }
         pending = set(futs.keys())
         try:
@@ -1022,6 +1512,15 @@ def refresh_all_stream(progress: Optional[Callable[[str], None]] = None,
                     snap.news_sources = srcs
                     push("news", {"news": snap.news,
                                   "news_sources": snap.news_sources})
+                elif stage == "lhb":
+                    snap.lhb = res.get("rows") or []
+                    snap.sources["lhb"] = "东方财富龙虎榜"
+                    push("lhb", {"lhb": snap.lhb,
+                                 "date": res.get("date", "")})
+                elif stage == "north":
+                    snap.northbound = res or {}
+                    snap.sources["northbound"] = "东方财富沪深港通"
+                    push("north", {"northbound": snap.northbound})
                 snap.sentiment = sentiment_temperature(
                     [_zt_obj(x) for x in snap.limit_up],
                     snap.limit_down_count, snap.indices)

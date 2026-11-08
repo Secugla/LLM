@@ -492,7 +492,7 @@ def fetch_daily_fast(symbol: str, start: str, end: str) -> pd.DataFrame:
 # ============================================================
 _EM_FS = ("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,"
           "m:0+t:81+s:2048")     # 深主板/深中小/沪主板/科创/北交所
-_EM_FIELDS = "f2,f3,f5,f6,f8,f12,f13,f14,f20,f21,f100"
+_EM_FIELDS = ("f2,f3,f5,f6,f8,f9,f12,f13,f14,f20,f21,f23,f24,f25,f100")
 
 
 def _fetch_em_quote_page(page: int) -> list:
@@ -532,6 +532,8 @@ def _quotes_from_eastmoney() -> dict:
             continue
         total_mv = _f(d.get("f20", 0), 1e-8)      # 元 → 亿元
         circ_mv = _f(d.get("f21", 0), 1e-8)
+        pe = _f(d.get("f9"))
+        pb = _f(d.get("f23"))
         quotes[code] = {
             "code": code, "name": name, "price": price,
             "change_pct": round(_f(d.get("f3")), 2),
@@ -540,6 +542,10 @@ def _quotes_from_eastmoney() -> dict:
             "turnover": round(_f(d.get("f8")), 2),  # 换手率 %
             "total_mv": round(total_mv, 2),         # 总市值（亿元）
             "circ_mv": round(circ_mv, 2),           # 流通市值（亿元）
+            "pe": round(pe, 2) if pe > 0 else None,   # 市盈率（动态）
+            "pb": round(pb, 2) if pb > 0 else None,   # 市净率
+            "chg60": round(_f(d.get("f24")), 2),     # 60 日涨跌幅 %
+            "chg_ytd": round(_f(d.get("f25")), 2),   # 年初至今涨跌幅 %
             "industry": str(d.get("f100", "") or ""),
             "is_st": ("ST" in name) or ("退" in name),
             "is_new": name.upper().startswith(("N", "C")),

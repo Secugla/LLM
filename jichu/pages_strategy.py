@@ -197,7 +197,7 @@ class StrategyPage(QWidget):
         self.tbl = make_table(
             ["排名", "代码", "名称", "行业", "综合分"] +
             [FACTOR_LABEL[k] for k in FACTOR_KEYS] +
-            ["风险等级", "命中概念"])
+            ["风险等级", "命中概念"], stretch_last=False)
         self.tbl.setColumnWidth(0, 46)
         self.tbl.setColumnWidth(1, 68)
         self.tbl.setColumnWidth(2, 88)

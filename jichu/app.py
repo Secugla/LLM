@@ -20,10 +20,11 @@ from PySide6.QtCore import QTimer, Qt, QSize
 from PySide6.QtGui import QFont, QGuiApplication, QIcon
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
                                QMainWindow, QPushButton, QVBoxLayout, QWidget,
-                               QButtonGroup, QStatusBar)
+                               QButtonGroup, QStatusBar, QScrollArea)
 
 from pages_backtest import BacktestPage
 from pages_info import MarketInfoPage
+from pages_lab import QuantLabPage
 from pages_picker import PickerPage
 from pages_recommend import RecommendPage
 from pages_strategy import StrategyPage
@@ -47,14 +48,14 @@ class NavButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(f"""
         QPushButton#Nav {{
-            color: #C7CCD4; background: transparent; border: none;
+            color: #B9C2D0; background: transparent; border: none;
             border-left: 3px solid transparent; text-align: left;
-            padding: 4px 14px; font-size: 13px;
+            padding: 4px 14px; font-size: 13px; border-radius: 8px;
         }}
-        QPushButton#Nav:hover {{ background: rgba(255,255,255,0.07);
+        QPushButton#Nav:hover {{ background: rgba(255,255,255,0.06);
             color: #FFFFFF; }}
         QPushButton#Nav:checked {{
-            background: rgba(200,22,29,0.14); color: #FFFFFF;
+            background: rgba(208,29,36,0.15); color: #FFFFFF;
             border-left: 3px solid {ACCENT}; font-weight: bold;
         }}
         """)
@@ -86,23 +87,39 @@ class MainWindow(QMainWindow):
 
         # 左侧导航
         nav = QFrame()
-        nav.setFixedWidth(210)
-        nav.setStyleSheet(f"background: #1B2330; border-right: 1px solid #2A3342;")
+        nav.setFixedWidth(212)
+        nav.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 #1D2533, stop:1 #161C27);"
+            "border-right: 1px solid #2A3342;")
         nl = QVBoxLayout(nav)
-        nl.setContentsMargins(0, 0, 0, 12)
+        nl.setContentsMargins(8, 0, 8, 12)
         nl.setSpacing(2)
 
         brand = QFrame()
-        brand.setFixedHeight(88)
+        brand.setFixedHeight(96)
         bt = QVBoxLayout(brand)
-        bt.setContentsMargins(18, 18, 12, 8)
+        bt.setContentsMargins(12, 16, 10, 8)
+        bt.setSpacing(2)
         t1 = QLabel("量化选股系统")
-        t1.setStyleSheet("color:#FFFFFF; font-size:17px; font-weight:bold;")
+        t1.setStyleSheet("color:#FFFFFF; font-size:17px; font-weight:bold;"
+                         "letter-spacing:0.5px;")
+        line = QFrame()
+        line.setFixedSize(34, 3)
+        line.setStyleSheet(f"background:{ACCENT}; border-radius:1px;")
         t2 = QLabel("A-SHARE QUANT TERMINAL")
-        t2.setStyleSheet("color:#7C8798; font-size:10px; letter-spacing:1px;")
+        t2.setStyleSheet("color:#7C8798; font-size:10px; letter-spacing:1.2px;")
         bt.addWidget(t1)
+        bt.addSpacing(4)
+        bt.addWidget(line)
+        bt.addSpacing(6)
         bt.addWidget(t2)
         nl.addWidget(brand)
+
+        sec = QLabel("功能导航 · NAVIGATION")
+        sec.setStyleSheet("color:#6C7686; font-size:10px;"
+                          "letter-spacing:1px; padding:10px 8px 6px;")
+        nl.addWidget(sec)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
@@ -114,6 +131,7 @@ class MainWindow(QMainWindow):
             ("4", "开盘前荐股", "MULTI-FACTOR PICKS"),
             ("5", "策略学习", "STRATEGY LIBRARY"),
             ("6", "量化回测", "BACKTEST"),
+            ("7", "量化研究", "FACTOR / ML LAB"),
         ]
         for i, (idx, title, sub) in enumerate(items):
             b = NavButton(idx, title, sub)
@@ -137,13 +155,17 @@ class MainWindow(QMainWindow):
         rl.setSpacing(0)
 
         top = QFrame()
-        top.setFixedHeight(62)
+        top.setFixedHeight(64)
         top.setStyleSheet(
             "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #1E2634, stop:1 #2C3A52);")
+            "stop:0 #1E2634, stop:1 #2C3A52);"
+            "border-bottom: 1px solid #35425A;")
         tl = QHBoxLayout(top)
-        tl.setContentsMargins(18, 10, 18, 10)
-        tl.setSpacing(12)
+        tl.setContentsMargins(20, 10, 20, 10)
+        tl.setSpacing(10)
+        accent = QFrame()
+        accent.setFixedSize(3, 18)
+        accent.setStyleSheet(f"background:{ACCENT}; border-radius:1px;")
         title = QLabel("市场概览")
         title.setObjectName("H1")
         self.page_title = title
@@ -155,8 +177,9 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setObjectName("Ghost")
         self.btn_refresh.clicked.connect(self._refresh_info)
         self.btn_pick = QPushButton("立即生成荐股")
-        self.btn_pick.setObjectName("Ghost")
+        self.btn_pick.setObjectName("Primary")
         self.btn_pick.clicked.connect(self._generate_picks)
+        tl.addWidget(accent)
         tl.addWidget(title)
         tl.addSpacing(10)
         tl.addWidget(self.market_lbl)
@@ -176,10 +199,17 @@ class MainWindow(QMainWindow):
         self.strategy_page = StrategyPage(
             self.set_status, lambda: self.info_page._snap)
         self.backtest_page = BacktestPage(self.set_status)
-        for page in (self.info_page, self.watch_page, self.picker_page,
-                     self.recommend_page, self.strategy_page,
-                     self.backtest_page):
-            self.stack.addWidget(page)
+        self.lab_page = QuantLabPage(self.set_status)
+        self.pages = [self.info_page, self.watch_page, self.picker_page,
+                      self.recommend_page, self.strategy_page,
+                      self.backtest_page, self.lab_page]
+        # 每个页面放进可滚动容器：窗口较矮/小屏时也能上下滚动查看全部底部内容；
+        # 回测页数据量最大（长周期持仓/交易明细），给更大的内容高度
+        heights = [1200, 900, 900, 900, 950, 1150, 1000]
+        self.page_views = [self._scroll_wrap(p, h)
+                           for p, h in zip(self.pages, heights)]
+        for view in self.page_views:
+            self.stack.addWidget(view)
         rl.addWidget(self.stack, stretch=1)
         root.addWidget(right, stretch=1)
         self.setCentralWidget(central)
@@ -198,14 +228,32 @@ class MainWindow(QMainWindow):
         self.info_page.snapshot_loaded.connect(self._accept_snapshot)
         self._switch_page(0, first=True)
 
+    def _scroll_wrap(self, page: QWidget, min_height: int) -> QScrollArea:
+        """把页面包进纵向滚动容器，窗口较矮时可以下划查看底部内容。"""
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        # 窄窗口下按需出现横向滚动条，避免页面内容被直接裁切
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sa.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }")
+        page.setMinimumHeight(min_height)
+        sa.setWidget(page)
+        return sa
+
     # ---------------- 页面切换 ----------------
     def _switch_page(self, index: int, first: bool = False):
         if index < 0 or index >= self.stack.count():
             return
         self.nav_btns[index].setChecked(True)
         titles = ["市场信息", "自选信号", "策略形态选股",
-                  "开盘前多因子荐股", "机构策略学习", "量化回测"]
+                  "开盘前多因子荐股", "机构策略学习", "量化回测",
+                  "量化研究"]
         self.page_title.setText(titles[index])
+        # 顶部按钮跟随页面功能：信息页只显示“刷新信息”，荐股页只显示“立即生成荐股”
+        self.btn_refresh.setVisible(index == 0)
+        self.btn_pick.setVisible(index == 3)
         if index == 2:
             self.set_status("设置市值/板块/形态条件后点击“开始选股”")
         elif index == 3:
@@ -213,7 +261,9 @@ class MainWindow(QMainWindow):
         elif index == 4:
             self.set_status("左侧选择机构策略，先学习公开方法论，再套用近似权重选股")
         elif index == 5:
-            self.set_status("输入代码与均线参数，运行回测查看净值/回撤/仓位")
+            self.set_status("选择模式与策略，设置回测长度和初始资金后点击“开始回测”")
+        elif index == 6:
+            self.set_status("因子 IC/分层、参数网格、机器学习滚动训练与回测历史")
         if first:
             self.stack.setCurrentIndex(index)
         else:

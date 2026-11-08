@@ -17,7 +17,7 @@ import requests
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QLineEdit, QSplitter,
-                               QTextBrowser, QProgressBar)
+                               QTextBrowser, QProgressBar, QHeaderView)
 
 from ui_common import (UP, DOWN, FLAT, TEXT, TEXT2, Worker, make_table,
                        cell, pct_color, skeleton_table)
@@ -130,10 +130,12 @@ class WatchlistPage(QWidget):
         split = QSplitter(Qt.Vertical)
         self.tbl = make_table(
             ["代码", "名称", "现价", "信号", "置信度", "多空分",
-             "RSI", "量比", "近5日%", "近20日%"])
+             "RSI", "量比", "近5日%", "近20日%"], stretch_last=False)
         self.tbl.setColumnWidth(0, 70)
         self.tbl.setColumnWidth(1, 100)
         self.tbl.setColumnWidth(3, 90)
+        # 列数少且内容短：平均铺满卡片宽度，避免表格右侧出现大片空白
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl.itemSelectionChanged.connect(self._show_detail)
         split.addWidget(self.tbl)
 
@@ -145,6 +147,9 @@ class WatchlistPage(QWidget):
         cap.setObjectName("CardTitle")
         cl.addWidget(cap)
         self.detail = QTextBrowser()
+        self.detail.setHtml(
+            f'<div style="color:{TEXT2}; font-size:12px; padding:10px 4px">'
+            '选择上方任意标的，查看信号构成、仓位建议与风险提示</div>')
         cl.addWidget(self.detail)
         split.addWidget(card)
         split.setSizes([360, 260])

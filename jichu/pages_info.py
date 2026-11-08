@@ -12,7 +12,7 @@ from typing import Callable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QSplitter, QComboBox,
-                               QProgressBar)
+                               QDialog, QProgressBar)
 
 from ui_common import (UP, DOWN, FLAT, TEXT2, CAT_COLOR, card,
                        StreamWorker, make_table, cell, pct_color, fmt_amount,
@@ -66,12 +66,14 @@ class MarketInfoPage(QWidget):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(12)
 
-        # 顶部：刷新 + 情绪温度 + 数据源 + 进度
+        # 顶部：刷新 + 情绪温度 + 数据源 + 进度（共两行，长文本不挤压单行）
         top = QFrame()
         top.setObjectName("Card")
-        tl = QHBoxLayout(top)
+        tl = QVBoxLayout(top)
         tl.setContentsMargins(16, 11, 16, 11)
-        tl.setSpacing(14)
+        tl.setSpacing(4)
+        r1 = QHBoxLayout()
+        r1.setSpacing(14)
         self.btn = QPushButton("刷新最新消息")
         self.btn.setObjectName("Primary")
         self.btn.clicked.connect(lambda: self.refresh(force=True))
@@ -85,12 +87,16 @@ class MarketInfoPage(QWidget):
         self.progress.setRange(0, 0)
         self.progress.setFixedWidth(150)
         self.progress.setVisible(False)
-        tl.addWidget(self.btn)
-        tl.addWidget(self.temp_lbl)
-        tl.addWidget(self.breadth_lbl)
-        tl.addStretch()
-        tl.addWidget(self.progress)
-        tl.addWidget(self.asof_lbl)
+        r1.addWidget(self.btn)
+        r1.addWidget(self.temp_lbl)
+        r1.addWidget(self.breadth_lbl)
+        r1.addStretch()
+        r1.addWidget(self.progress)
+        tl.addLayout(r1)
+        r2 = QHBoxLayout()
+        r2.addStretch()
+        r2.addWidget(self.asof_lbl)
+        tl.addLayout(r2)
         root.addWidget(top)
 
         # 指数卡片行
@@ -129,6 +135,47 @@ class MarketInfoPage(QWidget):
         mid.setSizes([700, 340])
         root.addWidget(mid, stretch=3)
 
+        # 资金面：龙虎榜 + 北向活跃股
+        fund = QSplitter(Qt.Horizontal)
+        fund.setChildrenCollapsible(False)
+        self.lhb_tbl = make_table(
+            ["代码", "名称", "涨幅%", "净买额", "成交额", "上榜原因"])
+        self.lhb_tbl.setColumnWidth(0, 68)
+        self.lhb_tbl.setColumnWidth(1, 92)
+        self.lhb_tbl.setColumnWidth(2, 62)
+        self.lhb_tbl.setColumnWidth(3, 92)
+        self.lhb_tbl.setColumnWidth(4, 86)
+        self.lhb_tbl.setColumnWidth(5, 210)
+        self.lhb_tbl.setToolTip("双击个股：查看当日买入/卖出前五席位、游资别名与历史胜率")
+        self.lhb_tbl.setMinimumHeight(220)
+        self.lhb_tbl.cellDoubleClicked.connect(self._open_seats)
+        fund.addWidget(card("龙虎榜 · 净买入榜", self.lhb_tbl))
+
+        nb_card = QFrame()
+        nb_card.setObjectName("Card")
+        nbl = QVBoxLayout(nb_card)
+        nbl.setContentsMargins(14, 12, 14, 14)
+        nbl.setSpacing(8)
+        cap2 = QLabel("北向资金 · 十大活跃股（按成交额）")
+        cap2.setObjectName("CardTitle")
+        self.nb_note = QLabel("净买额自 2024-08-19 起停止披露")
+        self.nb_note.setObjectName("Hint")
+        self.nb_note.setWordWrap(True)
+        nbl.addWidget(cap2)
+        nbl.addWidget(self.nb_note)
+        self.nb_tbl = make_table(["市场", "代码", "名称", "涨幅%", "成交额"],
+                                 stretch_last=False)
+        self.nb_tbl.setColumnWidth(0, 66)
+        self.nb_tbl.setColumnWidth(1, 68)
+        self.nb_tbl.setColumnWidth(2, 92)
+        self.nb_tbl.setColumnWidth(3, 62)
+        self.nb_tbl.setColumnWidth(4, 90)
+        self.nb_tbl.setMinimumHeight(220)
+        nbl.addWidget(self.nb_tbl)
+        fund.addWidget(nb_card)
+        fund.setSizes([720, 480])
+        root.addWidget(fund, stretch=2)
+
         # 底部：新闻
         news_card = QFrame()
         news_card.setObjectName("Card")
@@ -153,7 +200,7 @@ class MarketInfoPage(QWidget):
         nbar.addWidget(self.cat_box)
         nl.addLayout(nbar)
         self.news_tbl = make_table(["时间", "分类", "情绪", "标题"])
-        self.news_tbl.setColumnWidth(0, 142)
+        self.news_tbl.setColumnWidth(0, 175)
         self.news_tbl.setColumnWidth(1, 82)
         self.news_tbl.setColumnWidth(2, 56)
         nl.addWidget(self.news_tbl)
@@ -163,6 +210,8 @@ class MarketInfoPage(QWidget):
         skeleton_table(self.zt_tbl, 10, "正在获取涨停池…")
         skeleton_table(self.hot_tbl, 7, "正在聚类热点…")
         skeleton_table(self.sec_tbl, 7, "正在获取板块…")
+        skeleton_table(self.lhb_tbl, 6, "正在获取龙虎榜…")
+        skeleton_table(self.nb_tbl, 6, "正在获取北向活跃股…")
         skeleton_table(self.news_tbl, 8, "正在聚合财经快讯…")
 
     # ---------------- 数据 ----------------
@@ -212,8 +261,12 @@ class MarketInfoPage(QWidget):
             self._render_boards(payload)
         elif stage == "news":
             self._render_news(payload)
+        elif stage == "lhb":
+            self._render_lhb(payload.get("lhb") or [])
         elif stage == "sentiment":
             self._render_sentiment(payload.get("sentiment") or {})
+        elif stage == "north":
+            self._render_northbound(payload.get("northbound") or {})
         elif stage == "hot":
             self._render_hot(payload.get("hot_concepts") or [])
             if payload.get("limit_up"):
@@ -306,6 +359,125 @@ class MarketInfoPage(QWidget):
                 self.sec_tbl.setItem(r, 2, cell(x.get("lead", "")))
             self.sec_tbl.setSortingEnabled(True)
 
+    def _render_lhb(self, rows: list):
+        self._lhb_date = rows[0].get("date", "") if rows else ""
+        t = self.lhb_tbl
+        t.setSortingEnabled(False)
+        t.setRowCount(0)
+        for x in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            net = float(x.get("net_buy", 0) or 0)
+            t.setItem(r, 0, cell(x.get("code", ""), align=Qt.AlignCenter))
+            t.setItem(r, 1, cell(x.get("name", ""), bold=True))
+            t.setItem(r, 2, cell(
+                f"{x.get('change_pct', 0):+.2f}",
+                pct_color(x.get("change_pct", 0)), align=Qt.AlignCenter,
+                sort_value=x.get("change_pct", 0)))
+            t.setItem(r, 3, cell(
+                fmt_amount(net), UP if net >= 0 else DOWN, bold=True,
+                align=Qt.AlignCenter, sort_value=net))
+            t.setItem(r, 4, cell(
+                fmt_amount(x.get("amount", 0)), align=Qt.AlignCenter,
+                sort_value=x.get("amount", 0)))
+            c5 = cell("、".join(x.get("reasons", [])[:2]))
+            if x.get("turnover"):
+                c5.setToolTip(f"换手率 {x['turnover']:.2f}%")
+            t.setItem(r, 5, c5)
+        t.horizontalHeader().setSortIndicator(3, Qt.DescendingOrder)
+        t.setSortingEnabled(True)
+
+    def _open_seats(self, row: int, _col: int):
+        """双击龙虎榜个股，查看当日买卖前五席位与该席位历史表现。"""
+        code = self.lhb_tbl.item(row, 0).text()
+        name = self.lhb_tbl.item(row, 1).text()
+        date = getattr(self, "_lhb_date", "") or ""
+        self.set_status(f"读取 {code} 席位明细…")
+        try:
+            seats = market_info.fetch_lhb_seats(date) if date else {}
+        except Exception:
+            seats = {}
+        slot = seats.get(code) or {}
+        alias = market_info.load_seat_alias()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"席位明细 · {code} {name}")
+        dlg.resize(1120, 560)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+        head = QLabel(f"{code} {name}｜{date}｜席位质量 {slot.get('quality', 0):+.2f}")
+        head.setObjectName("CardTitle")
+        lay.addWidget(head)
+        tip = QLabel("3日历史胜率 = 该席位历史上榜后 3 日上涨概率（东财口径）；"
+                     "别名为本地可编辑映射（.cache/seat_alias.json），仅供参考")
+        tip.setObjectName("Hint")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+
+        box = QHBoxLayout()
+        for side, title in (("buys", "买入前 5 席位"),
+                            ("sells", "卖出前 5 席位")):
+            t = make_table(["席位 / 别名", "金额", "3日历史胜率", "样本"])
+            t.setColumnWidth(0, 520)
+            t.setColumnWidth(1, 110)
+            t.setColumnWidth(2, 110)
+            t.setColumnWidth(3, 70)
+            for x in slot.get(side) or []:
+                r = t.rowCount()
+                t.insertRow(r)
+                label = market_info.seat_alias_of(x["seat"], alias) or ""
+                txt = x["seat"] + (f"（{label}）" if label else "")
+                c0 = cell(txt)
+                c0.setToolTip(txt)
+                t.setItem(r, 0, c0)
+                t.setItem(r, 1, cell(fmt_amount(x["amount"]),
+                                     align=Qt.AlignCenter,
+                                     sort_value=x["amount"]))
+                prob = x.get("prob3")
+                t.setItem(r, 2, cell(
+                    f"{float(prob):.1f}%" if prob is not None else "—",
+                    pct_color((float(prob) - 50) if prob is not None else 0),
+                    align=Qt.AlignCenter))
+                t.setItem(r, 3, cell(str(x.get("samples") or "—"),
+                                     align=Qt.AlignCenter))
+            box.addWidget(card(title, t))
+        lay.addLayout(box)
+        self.set_status("")
+        dlg.exec()
+
+    def _render_northbound(self, payload: dict):
+        rows = payload.get("rows") or []
+        note = payload.get("note") or ""
+        d = payload.get("date") or ""
+        mk = payload.get("market") or {}
+        parts = [f"数据日 {d}"] if d else []
+        if mk.get("total"):
+            parts.append(f"沪股通成交 {fmt_amount(mk.get('sh', 0))}")
+            parts.append(f"深股通成交 {fmt_amount(mk.get('sz', 0))}")
+            parts.append(f"北向合计成交 {fmt_amount(mk.get('total', 0))}")
+        parts.append(note or "净买额自 2024-08-19 起停止披露")
+        self.nb_note.setText("｜".join(parts))
+        t = self.nb_tbl
+        t.setSortingEnabled(False)
+        t.setRowCount(0)
+        for x in rows:
+            r = t.rowCount()
+            t.insertRow(r)
+            t.setItem(r, 0, cell(x.get("market", ""), TEXT2,
+                                 align=Qt.AlignCenter))
+            t.setItem(r, 1, cell(x.get("code", ""), align=Qt.AlignCenter))
+            t.setItem(r, 2, cell(x.get("name", ""), bold=True))
+            t.setItem(r, 3, cell(
+                f"{x.get('change_pct', 0):+.2f}",
+                pct_color(x.get("change_pct", 0)), align=Qt.AlignCenter,
+                sort_value=x.get("change_pct", 0)))
+            amt = float(x.get("deal_amt", 0) or 0)
+            t.setItem(r, 4, cell(
+                fmt_amount(amt), align=Qt.AlignCenter, sort_value=amt))
+        t.horizontalHeader().setSortIndicator(4, Qt.DescendingOrder)
+        t.setSortingEnabled(True)
+
     def _render_news(self, payload: dict):
         srcs = payload.get("news_sources") or []
         self.news_src_lbl.setText(
@@ -335,6 +507,16 @@ class MarketInfoPage(QWidget):
             self._render_sectors(snap.sectors or [])
         self._render_news({"news": snap.news or [],
                            "news_sources": snap.news_sources or []})
+        lhb_rows = getattr(snap, "lhb", None) or []
+        if lhb_rows:
+            self._render_lhb(lhb_rows)
+        else:
+            skeleton_table(self.lhb_tbl, 6, "点击右上角刷新，获取当日龙虎榜")
+        nb = getattr(snap, "northbound", None) or {}
+        if nb.get("rows"):
+            self._render_northbound(nb)
+        else:
+            skeleton_table(self.nb_tbl, 6, "点击右上角刷新，获取北向活跃股")
         self.zt_tbl.setSortingEnabled(True)
         self.hot_tbl.setSortingEnabled(True)
         self.sec_tbl.setSortingEnabled(True)

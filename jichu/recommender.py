@@ -86,6 +86,10 @@ class Pick:
     factor_scores: dict = field(default_factory=dict)  # 因子简表（界面列）
     tags: List[str] = field(default_factory=list)
     data_quality: str = "完整"
+    pe: float = 0.0
+    pb: float = 0.0
+    chg60: float = 0.0
+    chg_ytd: float = 0.0
     # 兼容旧界面字段
     rotation_score: float = 0.0
     leader_score: float = 0.0
@@ -554,6 +558,10 @@ def recommend(snapshot=None, top_n: int = 20, workers: int = 10,
             tags=(["周线多头"] if (weeklys.get(code)
                                   and weeklys[code].get("bull")) else []),
             data_quality=res["data_quality"],
+            pe=float(q.get("pe") or 0),
+            pb=float(q.get("pb") or 0),
+            chg60=float(q.get("chg60") or 0),
+            chg_ytd=float(q.get("chg_ytd") or 0),
             rotation_score=factors["rotation"]["score"],
             leader_score=factors["leader"]["score"],
             hot_score=factors["theme"]["score"],

@@ -109,23 +109,29 @@ class RecommendPage(QWidget):
         self.progress.setVisible(False)
         bl.addWidget(self.progress)
         bl.addStretch()
-        self.degraded_lbl = QLabel("")
-        self.degraded_lbl.setStyleSheet(f"color:{WARN}; font-size:12px;")
-        bl.addWidget(self.degraded_lbl)
-        self.date_lbl = QLabel("")
-        self.date_lbl.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
-        bl.addWidget(self.date_lbl)
         root.addWidget(bar)
 
+        # 状态行：说明文字 + 降级提示 + 生成时间（放第二行，避免顶栏被长文本撑宽）
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
         self.note_lbl = QLabel("开盘前 T-3 分钟生成；非交易时段使用最近收盘数据并自动降级")
         self.note_lbl.setObjectName("Hint")
-        root.addWidget(self.note_lbl)
+        self.note_lbl.setWordWrap(True)
+        self.degraded_lbl = QLabel("")
+        self.degraded_lbl.setStyleSheet(f"color:{WARN}; font-size:12px;")
+        self.date_lbl = QLabel("")
+        self.date_lbl.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
+        info_row.addWidget(self.note_lbl, 1)
+        info_row.addWidget(self.degraded_lbl)
+        info_row.addWidget(self.date_lbl)
+        root.addLayout(info_row)
 
         split = QSplitter(Qt.Horizontal)
         split.setChildrenCollapsible(False)
         headers = ["排名", "代码", "名称", "行业", "现价", "涨幅%", "综合分"] + \
-                  [FACTOR_LABEL[k] for k in FACTOR_KEYS] + ["命中概念"]
-        self.pick_tbl = make_table(headers)
+                  [FACTOR_LABEL[k] for k in FACTOR_KEYS] + \
+                  ["命中概念", "PE", "PB", "60日%", "年内%"]
+        self.pick_tbl = make_table(headers, stretch_last=False)
         self.pick_tbl.setColumnWidth(0, 46)
         self.pick_tbl.setColumnWidth(1, 68)
         self.pick_tbl.setColumnWidth(2, 88)
@@ -135,6 +141,8 @@ class RecommendPage(QWidget):
         for i in range(7, 7 + len(FACTOR_KEYS)):
             self.pick_tbl.setColumnWidth(i, 52)
         self.pick_tbl.setColumnWidth(15, 200)
+        for i in range(16, 20):
+            self.pick_tbl.setColumnWidth(i, 62)
         self.pick_tbl.itemSelectionChanged.connect(self._show_pick_reason)
         split.addWidget(self.pick_tbl)
 
@@ -299,6 +307,20 @@ class RecommendPage(QWidget):
             self.pick_tbl.setItem(
                 r, 7 + len(FACTOR_KEYS),
                 cell("、".join(p.get("hit_concepts", [])[:5])))
+            pe = float(p.get("pe") or 0)
+            pb = float(p.get("pb") or 0)
+            self.pick_tbl.setItem(r, 16, cell(
+                f"{pe:.1f}" if pe > 0 else "亏损",
+                (WARN if pe > 60 else TEXT2) if pe > 0 else DOWN,
+                align=Qt.AlignCenter, sort_value=pe))
+            self.pick_tbl.setItem(r, 17, cell(
+                f"{pb:.2f}" if pb > 0 else "—", TEXT2,
+                align=Qt.AlignCenter, sort_value=pb))
+            for idx, key in ((18, "chg60"), (19, "chg_ytd")):
+                v = float(p.get(key) or 0)
+                self.pick_tbl.setItem(r, idx, cell(
+                    f"{v:+.2f}", pct_color(v), align=Qt.AlignCenter,
+                    sort_value=v))
 
         self.ladder_tbl.setRowCount(0)
         for s in res.get("ladder", []):
