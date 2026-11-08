@@ -24,6 +24,86 @@ import pandas as pd
 
 
 # ============================================================
+#  市场环境（大盘 + 情绪 + 领涨板块）
+# ============================================================
+_ENV_CACHE = {"ts": 0.0, "env": None}
+_ENV_TTL = 300          # 5 分钟内复用，避免自选批量分析时重复请求
+
+
+def _neutral_env(note: str = "市场环境数据不可用，按中性处理") -> dict:
+    return {"mood": "中性", "index_pct": 0.0, "temperature": 50.0,
+            "leaders": [], "indices": {}, "note": note, "asof": ""}
+
+
+def load_market_env(force: bool = False) -> dict:
+    """
+    读取当前市场环境：指数涨跌、情绪温度、领涨行业板块。
+    失败时返回中性环境（不阻断自选信号计算）。
+    """
+    now = dt.datetime.now().timestamp()
+    if (not force and _ENV_CACHE["env"] is not None
+            and now - _ENV_CACHE["ts"] < _ENV_TTL):
+        return _ENV_CACHE["env"]
+
+    env = _neutral_env()
+    try:
+        import market_info
+        indices = market_info.fetch_indices() or {}
+        if indices:
+            pcts = [float(v.get("change_pct", 0) or 0)
+                    for v in indices.values()]
+            env["index_pct"] = round(sum(pcts) / len(pcts), 2)
+            env["indices"] = {k: round(float(v.get("change_pct", 0) or 0), 2)
+                              for k, v in indices.items()}
+        snap = market_info.load_latest_snapshot()
+        if snap is not None:
+            sent = snap.sentiment or {}
+            env["temperature"] = round(
+                float(sent.get("temperature", 50) or 50), 1)
+            env["mood"] = sent.get("label", "") or "中性"
+            boards = list(getattr(snap, "em_industry_boards", None)
+                          or getattr(snap, "sectors", None) or [])
+            boards = sorted(boards,
+                            key=lambda b: float(b.get("change_pct", 0) or 0),
+                            reverse=True)[:3]
+            env["leaders"] = [
+                f"{b.get('name', '')} {float(b.get('change_pct', 0) or 0):+.1f}%"
+                for b in boards if b.get("name")]
+            env["asof"] = getattr(snap, "asof", "")
+        elif env["indices"]:
+            env["mood"] = "偏多" if env["index_pct"] > 0.5 else (
+                "偏弱" if env["index_pct"] < -0.5 else "中性")
+        parts = [f"指数均值 {env['index_pct']:+.2f}%",
+                 f"情绪 {env['temperature']:.0f}（{env['mood']}）"]
+        if env["leaders"]:
+            parts.append("领涨：" + "、".join(env["leaders"]))
+        env["note"] = " · ".join(parts)
+    except Exception:
+        env = _neutral_env()
+
+    _ENV_CACHE["ts"] = now
+    _ENV_CACHE["env"] = env
+    return env
+
+
+def env_bias(env: dict) -> float:
+    """市场环境对个股总分的修正（约 ±2 分）：指数趋势 + 情绪温度。"""
+    idx = max(-1.8, min(1.8, float(env.get("index_pct", 0) or 0)))
+    temp = float(env.get("temperature", 50) or 50)
+    bias = idx * 0.5 + (temp - 50) / 50 * 0.8
+    return round(max(-2.2, min(2.2, bias)), 2)
+
+
+def env_reason(env: dict, bias: float) -> str:
+    """市场环境说明（写入多头/空头理由）。"""
+    if bias >= 0.3:
+        return (f"市场环境偏多：{env.get('note', '')}，多头总分 +{bias}")
+    if bias <= -0.3:
+        return (f"市场环境偏弱：{env.get('note', '')}，总分 {bias}")
+    return f"市场环境中性：{env.get('note', '')}，总分基本不变"
+
+
+# ============================================================
 #  指标计算
 # ============================================================
 def _ema(s, n):
@@ -199,11 +279,18 @@ class StockSignal:
     bear: List[str] = field(default_factory=list)
     indicators: dict = field(default_factory=dict)
     advice: str = ""
+    score_raw: float = 0.0       # 未经市场环境修正的技术总分
+    env_bias: float = 0.0        # 市场环境修正分
+    market: dict = field(default_factory=dict)   # 市场环境快照
 
 
 def analyze_stock(code: str, name: Optional[str] = None,
-                  start: Optional[str] = None) -> Optional[StockSignal]:
-    """分析单只股票，返回 StockSignal；取数失败返回 None。"""
+                  start: Optional[str] = None,
+                  env: Optional[dict] = None) -> Optional[StockSignal]:
+    """分析单只股票，返回 StockSignal；取数失败返回 None。
+
+    env 为 load_market_env() 的市场环境；不传时自动获取（批量分析应复用同一个）。
+    """
     from data_sources import fetch_daily
     end = dt.date.today().strftime("%Y%m%d")
     if start is None:
@@ -213,13 +300,19 @@ def analyze_stock(code: str, name: Optional[str] = None,
         if df is None or len(df) < 30:
             return None
         ind = compute_indicators(df)
-        total, bull, bear = score_signals(ind)
+        raw, bull, bear = score_signals(ind)
+        env = env or load_market_env()
+        bias = env_bias(env)
+        total = round(raw + bias, 2)
+        reason = env_reason(env, bias)
+        (bull if bias >= 0 else bear).append(reason)
         grade, conf = _grade(total)
         return StockSignal(
             code=code, name=name or "", price=ind["price"],
             signal=grade, confidence=conf, score=total,
             bull=bull, bear=bear, indicators=ind,
-            advice=_position_advice(grade, total))
+            advice=_position_advice(grade, total),
+            score_raw=raw, env_bias=bias, market=env)
     except Exception:
         return None
 
@@ -227,11 +320,13 @@ def analyze_stock(code: str, name: Optional[str] = None,
 def analyze_watchlist(items: List[dict], workers: int = 8) -> List[dict]:
     """
     批量分析自选股。items: [{code,name}]，返回信号 dict 列表（按信号强度排序）。
+    市场环境只取一次，所有个股共用，避免重复请求大盘数据。
     """
     out = []
+    env = load_market_env()
 
     def work(it):
-        return analyze_stock(it["code"], it.get("name"))
+        return analyze_stock(it["code"], it.get("name"), env=env)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for fut in as_completed([ex.submit(work, it) for it in items]):

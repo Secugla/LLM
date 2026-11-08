@@ -81,6 +81,7 @@ class WatchlistPage(QWidget):
             self.signals = [s for s in sigs if s["code"] in codes]
             if self.signals:
                 self._fill_table(self.signals)
+                self._render_env(self.signals[0].get("market"))
         except Exception:
             pass
 
@@ -126,6 +127,14 @@ class WatchlistPage(QWidget):
         bl.addWidget(self.progress)
         bl.addWidget(self.refresh_btn)
         root.addWidget(bar)
+
+        # 市场环境 + 信号规则说明（信号计算方式透明化）
+        self.env_lbl = QLabel(
+            "市场环境加载中…（信号 = 技术面多空加权 + 大盘/情绪修正；"
+            "均线±4.5、MACD±2、RSI±1.5、布林/量能/动量各±1）")
+        self.env_lbl.setObjectName("Hint")
+        self.env_lbl.setWordWrap(True)
+        root.addWidget(self.env_lbl)
 
         split = QSplitter(Qt.Vertical)
         self.tbl = make_table(
@@ -231,6 +240,7 @@ class WatchlistPage(QWidget):
         if sigs:
             self._save_cached_signals(sigs)
             self._fill_table(sigs)
+            self._render_env(sigs[0].get("market"))
         else:
             # 网络全部失败时保留占位/缓存，不清空，并提示
             self.set_status("实时信号获取失败（网络受限），当前显示本地已有数据")
@@ -288,6 +298,21 @@ class WatchlistPage(QWidget):
         self.set_status(f"自选信号已刷新：{len(sigs)} 只")
         self.tbl.selectRow(0)
 
+    def _render_env(self, env):
+        """自选页顶部的市场环境与信号规则说明。"""
+        rule = ("信号 = 日线技术面加权（均线±4.5、MACD±2、RSI±1.5、"
+                "布林/量能/动量各±1）；收盘后形成、次日执行")
+        if not env:
+            self.env_lbl.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
+            self.env_lbl.setText("市场环境未获取：信号仅按技术面计算。" + rule)
+            return
+        bias = signal_engine.env_bias(env)
+        color = UP if bias >= 0.3 else (DOWN if bias <= -0.3 else TEXT2)
+        self.env_lbl.setStyleSheet(f"color:{color}; font-size:12px;")
+        self.env_lbl.setText(
+            f"市场环境：{env.get('note', '')} → 对个股总分修正 "
+            f"{bias:+.2f} 分（偏多加分 / 偏弱减分）。{rule}")
+
     def _show_detail(self):
         rows = self.tbl.selectionModel().selectedRows()
         if not rows:
@@ -299,9 +324,16 @@ class WatchlistPage(QWidget):
         sig = s["signal"]
         ind = s["indicators"]
         ma = ind["ma"]
+        raw = float(s.get("score_raw", s["score"]))
+        bias = float(s.get("env_bias", 0.0) or 0.0)
         html = f"<b style='font-size:14px;color:{_SIG_COLOR.get(sig, TEXT)}'>"
         html += f"{s['code']} {s['name']} → {sig}</b>"
-        html += f"（置信度 {s['confidence']:.0%}，多空总分 {s['score']:+.1f}）<br>"
+        html += (f"（置信度 {s['confidence']:.0%}，总分 {s['score']:+.1f}"
+                 f" = 技术分 {raw:+.1f} + 环境修正 {bias:+.2f}）<br>")
+        env = s.get("market") or {}
+        if env:
+            html += (f"<span style='color:{TEXT2}'>市场环境："
+                     f"{env.get('note', '')}</span><br>")
         html += f"MA5 {ma['5']} · MA20 {ma['20']} · MA60 {ma['60']}<br>"
         html += f"DIF {ind['dif']} · DEA {ind['dea']} · MACD柱 {ind['hist']}<br>"
         html += f"RSI {ind['rsi']} · 量比 {ind['vol_ratio']} · "
@@ -314,4 +346,9 @@ class WatchlistPage(QWidget):
         for b in s["bear"]:
             html += f"<span style='color:{DOWN}'>- {b}</span><br>"
         html += "<b>操作建议：</b>" + s["advice"]
+        html += ("<br><br><span style='color:" + TEXT2 + "; font-size:11px'>"
+                 "信号规则：均线多头/金叉/MA20 上方各加分（权重最高），MACD 状态与"
+                 "红绿柱、RSI 超买超卖、布林触轨、量比与 5/20 日动量共同打分；"
+                 "|总分|≥4 为强烈、≥1.5 为买入/卖出，市场环境按指数与情绪温度"
+                 "再修正约 ±2 分。</span>")
         self.detail.setHtml(html)
