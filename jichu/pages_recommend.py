@@ -18,7 +18,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QSplitter, QTextBrowser,
-                               QProgressBar, QFileDialog)
+                               QComboBox, QProgressBar, QFileDialog)
 
 from ui_common import (UP, DOWN, FLAT, WARN, TEXT2, Worker, make_table, cell,
                        pct_color, skeleton_table, export_table_csv)
@@ -87,15 +87,20 @@ class RecommendPage(QWidget):
         bl.setContentsMargins(16, 10, 16, 10)
         bl.setSpacing(10)
 
-        self.batch_btns = {}
+        # 批次选择：与其它页一致使用下拉框，单独一块，与操作按钮区分
+        bl.addWidget(QLabel("推荐批次"))
+        self.batch_cb = QComboBox()
         for slot, label in BATCHES:
-            b = QPushButton(label)
-            b.setObjectName("Tab")
-            b.setCheckable(True)
-            b.clicked.connect(lambda checked=False, s=slot: self._switch_batch(s))
-            self.batch_btns[slot] = b
-            bl.addWidget(b)
-        bl.addSpacing(8)
+            self.batch_cb.addItem(label, slot)
+        self.batch_cb.setMinimumWidth(150)
+        self.batch_cb.setToolTip("早盘批 9:27 生成；午盘批 12:57 使用上午行情重排")
+        self.batch_cb.currentIndexChanged.connect(self._on_batch_changed)
+        bl.addWidget(self.batch_cb)
+        divider = QFrame()
+        divider.setFixedWidth(1)
+        divider.setFixedHeight(24)
+        divider.setStyleSheet("background:#E3E6EA;")
+        bl.addWidget(divider)
         self.btn = QPushButton("生成多因子荐股")
         self.btn.setObjectName("Primary")
         self.btn.clicked.connect(self.generate)
@@ -126,52 +131,76 @@ class RecommendPage(QWidget):
         info_row.addWidget(self.date_lbl)
         root.addLayout(info_row)
 
-        split = QSplitter(Qt.Horizontal)
-        split.setChildrenCollapsible(False)
+        # 荐股表占满整行宽度，避免右侧梯队挤压主要数据列
         headers = ["排名", "代码", "名称", "行业", "现价", "涨幅%", "综合分"] + \
                   [FACTOR_LABEL[k] for k in FACTOR_KEYS] + \
-                  ["命中概念", "PE", "PB", "60日%", "年内%"]
+                  ["命中概念", "PE/PB", "60日/年内%"]
         self.pick_tbl = make_table(headers, stretch_last=False)
-        self.pick_tbl.setColumnWidth(0, 46)
-        self.pick_tbl.setColumnWidth(1, 68)
-        self.pick_tbl.setColumnWidth(2, 88)
-        self.pick_tbl.setColumnWidth(3, 88)
+        self.pick_tbl.setColumnWidth(0, 40)
+        self.pick_tbl.setColumnWidth(1, 60)
+        self.pick_tbl.setColumnWidth(2, 76)
+        self.pick_tbl.setColumnWidth(3, 68)
         for i in range(4, 7):
-            self.pick_tbl.setColumnWidth(i, 62)
+            self.pick_tbl.setColumnWidth(i, 56)
         for i in range(7, 7 + len(FACTOR_KEYS)):
-            self.pick_tbl.setColumnWidth(i, 52)
-        self.pick_tbl.setColumnWidth(15, 200)
-        for i in range(16, 20):
-            self.pick_tbl.setColumnWidth(i, 62)
+            self.pick_tbl.setColumnWidth(i, 42)
+        self.pick_tbl.setColumnWidth(15, 130)
+        self.pick_tbl.setColumnWidth(16, 72)
+        self.pick_tbl.setColumnWidth(17, 92)
+        self.pick_tbl.setMinimumHeight(190)
         self.pick_tbl.itemSelectionChanged.connect(self._show_pick_reason)
-        split.addWidget(self.pick_tbl)
+        root.addWidget(self.pick_tbl, stretch=3)
 
+        # 底部：涨停梯队 + 因子与推荐理由，左右并排，不再是主表右侧的挤压块
+        bottom = QSplitter(Qt.Horizontal)
+        bottom.setChildrenCollapsible(False)
+
+        ladder_card = QFrame()
+        ladder_card.setObjectName("Card")
+        ll = QVBoxLayout(ladder_card)
+        ll.setContentsMargins(12, 10, 12, 10)
+        ll.setSpacing(6)
+        cap1 = QLabel("涨停梯队（连板 / 封单 / 炸板）")
+        cap1.setObjectName("CardTitle")
+        cap1.setToolTip("用于判断市场情绪高度与接力风险：连板高度、封单金额、炸板次数")
+        ll.addWidget(cap1)
         self.ladder_tbl = make_table(
             ["代码", "名称", "连板", "封单(亿)", "炸板", "涨停原因"])
-        self.ladder_tbl.setColumnWidth(0, 68)
-        self.ladder_tbl.setColumnWidth(1, 92)
-        self.ladder_tbl.setColumnWidth(2, 50)
+        self.ladder_tbl.setColumnWidth(0, 60)
+        self.ladder_tbl.setColumnWidth(1, 80)
+        self.ladder_tbl.setColumnWidth(2, 46)
+        self.ladder_tbl.setColumnWidth(3, 64)
+        self.ladder_tbl.setColumnWidth(4, 46)
         self.ladder_tbl.setColumnWidth(5, 180)
-        split.addWidget(self.ladder_tbl)
-        split.setSizes([880, 380])
-        root.addWidget(split, stretch=3)
+        ll.addWidget(self.ladder_tbl)
+        bottom.addWidget(ladder_card)
 
         reason_card = QFrame()
         reason_card.setObjectName("Card")
         rl = QVBoxLayout(reason_card)
-        rl.setContentsMargins(14, 10, 14, 12)
+        rl.setContentsMargins(12, 10, 12, 10)
+        rl.setSpacing(6)
         cap = QLabel("因子构成与推荐理由")
         cap.setObjectName("CardTitle")
         rl.addWidget(cap)
         self.reason_box = QTextBrowser()
-        self.reason_box.setMinimumHeight(120)
-        self.reason_box.setMaximumHeight(210)
+        self.reason_box.setMinimumHeight(110)
         self.reason_box.setOpenExternalLinks(True)
         rl.addWidget(self.reason_box)
-        root.addWidget(reason_card, stretch=1)
+        bottom.addWidget(reason_card)
+
+        bottom.setSizes([620, 480])
+        bottom.setMinimumHeight(180)
+        bottom.setMaximumHeight(250)
+        root.addWidget(bottom, stretch=0)
 
         skeleton_table(self.pick_tbl, 8, "等待生成多因子名单…")
         skeleton_table(self.ladder_tbl, 6, "等待涨停梯队…")
+
+    def _on_batch_changed(self, idx: int):
+        slot = self.batch_cb.itemData(idx)
+        if slot and slot != self.batch:
+            self._switch_batch(slot)
 
     def _switch_batch(self, slot: str):
         self.batch = slot
@@ -254,8 +283,10 @@ class RecommendPage(QWidget):
 
     # ---------------- 渲染 ----------------
     def _render(self):
-        for slot, b in self.batch_btns.items():
-            b.setChecked(slot == self.batch)
+        idx = 1 if self.batch == "noon" else 0
+        self.batch_cb.blockSignals(True)
+        self.batch_cb.setCurrentIndex(idx)
+        self.batch_cb.blockSignals(False)
         res = self.results[self.batch]
         self._row_picks = {}
         if res is None:
@@ -327,18 +358,17 @@ class RecommendPage(QWidget):
                 cell("、".join(p.get("hit_concepts", [])[:5])))
             pe = float(p.get("pe") or 0)
             pb = float(p.get("pb") or 0)
+            pe_txt = f"{pe:.1f}" if pe > 0 else "亏损"
+            pb_txt = f"{pb:.2f}" if pb > 0 else "—"
             self.pick_tbl.setItem(r, 16, cell(
-                f"{pe:.1f}" if pe > 0 else "亏损",
+                f"{pe_txt}/{pb_txt}",
                 (WARN if pe > 60 else TEXT2) if pe > 0 else DOWN,
                 align=Qt.AlignCenter, sort_value=pe))
+            v60 = float(p.get("chg60") or 0)
+            vytd = float(p.get("chg_ytd") or 0)
             self.pick_tbl.setItem(r, 17, cell(
-                f"{pb:.2f}" if pb > 0 else "—", TEXT2,
-                align=Qt.AlignCenter, sort_value=pb))
-            for idx, key in ((18, "chg60"), (19, "chg_ytd")):
-                v = float(p.get(key) or 0)
-                self.pick_tbl.setItem(r, idx, cell(
-                    f"{v:+.2f}", pct_color(v), align=Qt.AlignCenter,
-                    sort_value=v))
+                f"{v60:+.1f}/{vytd:+.1f}", pct_color(v60),
+                align=Qt.AlignCenter, sort_value=v60))
 
         self.ladder_tbl.setRowCount(0)
         for s in res.get("ladder", []):
