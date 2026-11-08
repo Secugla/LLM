@@ -15,8 +15,7 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QComboBox, QSplitter,
-                               QTextBrowser, QDoubleSpinBox, QSpinBox,
-                               QProgressBar, QFileDialog)
+                               QTextBrowser, QProgressBar, QFileDialog)
 
 from ui_common import (UP, DOWN, FLAT, WARN, TEXT2, StreamWorker, make_table,
                        cell, pct_color, fmt_amount, skeleton_table,
@@ -39,6 +38,16 @@ SCOPE_KEYS = [("all", "全部A股"), ("main", "沪深主板"),
               ("gem", "创业板"), ("star", "科创板"), ("bj", "北交所")]
 MAX_KEYS = [(200, "200 只（较快）"), (400, "400 只（推荐）"),
             (600, "600 只"), (800, "800 只"), (0, "全部（较慢）")]
+# 总市值预设（下限, 上限，单位亿元）：覆盖微盘到超大盘，默认全市场保证有标的
+MV_KEYS = [(20, 3000, "全市场 20~3000 亿"),
+           (20, 200, "中小盘 20~200 亿"),
+           (50, 500, "中盘 50~500 亿"),
+           (100, 1000, "大盘 100~1000 亿"),
+           (10, 80, "微盘活跃 10~80 亿"),
+           (500, 3000, "超大盘 500~3000 亿"),
+           (0, 10000, "不限 0~10000 亿")]
+# 最低形态命中：1 宽松（结果多）、2 推荐、3 严格（结果少）
+MIN_TAG_KEYS = [(1, "1 个（宽松）"), (2, "2 个（推荐）"), (3, "3 个（严格）")]
 
 
 class PickerPage(QWidget):
@@ -77,19 +86,12 @@ class PickerPage(QWidget):
 
         row1.addSpacing(10)
         row1.addWidget(QLabel("总市值"))
-        self.mv_min = QDoubleSpinBox()
-        self.mv_min.setRange(0, 10000)
-        self.mv_min.setValue(30)
-        self.mv_min.setSuffix(" 亿")
-        self.mv_min.setSingleStep(10)
-        row1.addWidget(self.mv_min)
-        row1.addWidget(QLabel("~"))
-        self.mv_max = QDoubleSpinBox()
-        self.mv_max.setRange(0, 10000)
-        self.mv_max.setValue(3000)
-        self.mv_max.setSuffix(" 亿")
-        self.mv_max.setSingleStep(50)
-        row1.addWidget(self.mv_max)
+        self.mv_cb = QComboBox()
+        self.mv_cb.addItems([n for _, _, n in MV_KEYS])
+        self.mv_cb.setCurrentIndex(0)
+        self.mv_cb.setMinimumWidth(170)
+        self.mv_cb.setToolTip("预设市值区间：选择后自动对应区间下限与上限")
+        row1.addWidget(self.mv_cb)
 
         row1.addSpacing(10)
         row1.addWidget(QLabel("板块"))
@@ -108,12 +110,11 @@ class PickerPage(QWidget):
         row2.addWidget(self.max_cb)
         row2.addSpacing(10)
         row2.addWidget(QLabel("最低形态命中"))
-        self.min_tags = QSpinBox()
-        self.min_tags.setRange(1, 5)
-        self.min_tags.setValue(2)
-        self.min_tags.setSuffix(" 个")
-        self.min_tags.setToolTip("仅「多形态组合」策略生效")
-        row2.addWidget(self.min_tags)
+        self.min_tags_cb = QComboBox()
+        self.min_tags_cb.addItems([n for _, n in MIN_TAG_KEYS])
+        self.min_tags_cb.setCurrentIndex(1)
+        self.min_tags_cb.setToolTip("仅「多形态组合」策略生效；条件过严时结果为空会自动放宽一档")
+        row2.addWidget(self.min_tags_cb)
         row2.addSpacing(10)
 
         self.btn = QPushButton("开始选股")
@@ -142,9 +143,34 @@ class PickerPage(QWidget):
 
         self.hint_lbl = QLabel(
             "形态选股：市值/板块/流动性硬过滤 → 日线与周线形态标签 → 形态分排序；"
+            "预设区间与命中数为下拉选择，条件过硬时自动放宽一档并标注；"
             "结果不构成投资建议")
         self.hint_lbl.setObjectName("Hint")
+        self.hint_lbl.setWordWrap(True)
         root.addWidget(self.hint_lbl)
+
+        # 结果排序工具条：任意时刻（含扫描中）可对已加载结果做顺序/倒序排列
+        sort_bar = QHBoxLayout()
+        sort_bar.setContentsMargins(0, 0, 0, 0)
+        sort_bar.addWidget(QLabel("结果排序："))
+        self.sort_field = QComboBox()
+        for label, col in [("形态分", 10), ("命中数", 11), ("涨幅%", 5),
+                           ("成交额", 9), ("总市值", 6), ("流通市值", 7),
+                           ("换手%", 8), ("现价", 4)]:
+            self.sort_field.addItem(label, col)
+        self.sort_order = QComboBox()
+        self.sort_order.addItem("倒序（大 → 小）", Qt.DescendingOrder)
+        self.sort_order.addItem("顺序（小 → 大）", Qt.AscendingOrder)
+        self.sort_apply = QPushButton("应用排序")
+        self.sort_apply.setObjectName("GhostBtn")
+        self.sort_apply.setToolTip("对当前表格已加载的结果按所选字段排序；"
+                                   "扫描结束后也可以直接点击表头排序")
+        self.sort_apply.clicked.connect(self._apply_sort)
+        sort_bar.addWidget(self.sort_field)
+        sort_bar.addWidget(self.sort_order)
+        sort_bar.addWidget(self.sort_apply)
+        sort_bar.addStretch()
+        root.addLayout(sort_bar)
 
         split = QSplitter(Qt.Vertical)
         split.setChildrenCollapsible(False)
@@ -166,20 +192,40 @@ class PickerPage(QWidget):
         self.detail_title.setObjectName("CardTitle")
         cl.addWidget(self.detail_title)
         self.detail = QTextBrowser()
+        self.detail.setHtml(
+            f'<div style="color:{TEXT2}; font-size:12px; padding:10px 4px">'
+            '点击上方任意个股，查看形态条件命中情况与操作建议</div>')
         cl.addWidget(self.detail)
         split.addWidget(card)
         split.setSizes([430, 300])
         root.addWidget(split, stretch=3)
 
+    # ---------------- 排序 ----------------
+    def _apply_sort(self):
+        """按所选字段对当前已加载结果做顺序/倒序排列（扫描中也可用）。"""
+        if self.tbl.rowCount() == 0:
+            self.set_status("还没有可排序的结果，请先开始选股")
+            return
+        col = int(self.sort_field.currentData())
+        order = self.sort_order.currentData()
+        self.tbl.setSortingEnabled(True)
+        self.tbl.sortItems(col, order)
+        # 表头显示排序箭头，之后点击其他表头仍可切换排序
+        self.tbl.horizontalHeader().setSortIndicator(col, order)
+        label = self.sort_field.currentText()
+        arrow = "倒序" if order == Qt.DescendingOrder else "顺序"
+        self.set_status(f"已按「{label}」{arrow}排列（{self.tbl.rowCount()} 行）")
+
     # ---------------- 扫描 ----------------
     def _config(self) -> dict:
         max_n = MAX_KEYS[self.max_cb.currentIndex()][0]
+        mv_min, mv_max, _ = MV_KEYS[self.mv_cb.currentIndex()]
         return {
-            "min_mv": self.mv_min.value(),
-            "max_mv": self.mv_max.value(),
+            "min_mv": mv_min,
+            "max_mv": mv_max,
             "scope": SCOPE_KEYS[self.scope_cb.currentIndex()][0],
             "max_candidates": max_n,
-            "min_tags": self.min_tags.value(),
+            "min_tags": MIN_TAG_KEYS[self.min_tags_cb.currentIndex()][0],
         }
 
     def run_scan(self):
@@ -255,6 +301,8 @@ class PickerPage(QWidget):
         state = "信号" if sig else "观察"
         if r.get("mode") == "pattern":
             state = "形态命中"
+        if r.get("relaxed"):
+            state = "放宽命中"
         self.tbl.setItem(row, 0, cell(
             r.get("rank", row + 1), UP, bold=True, align=Qt.AlignCenter,
             sort_value=r.get("rank", row + 1)))
@@ -306,11 +354,16 @@ class PickerPage(QWidget):
         f = res.get("filter_stats") or {}
         self.summary_lbl.setText(
             f"候选 {res.get('candidates', 0)} 只 · 已扫 {res.get('scanned', 0)}"
-            f" · 命中 {len(res.get('hits', []))} 只 · 耗时 {res.get('elapsed', 0)}s")
-        self.summary_lbl.setToolTip(
-            "；".join(f"{k}剔除{v}只" for k, v in f.items()))
+            f" · 命中 {len(res.get('hits', []))} 只 · 耗时 {res.get('elapsed', 0)}s"
+            + (" · 已放宽条件" if res.get("relaxed") else ""))
+        tips = [f"{k}剔除{v}只" for k, v in f.items()]
+        if res.get("relaxed_note"):
+            tips.append(res["relaxed_note"])
+        self.summary_lbl.setToolTip("；".join(tips))
         msg = (f"选股完成：{res.get('strategy_name', '')}，"
                f"命中 {len(res.get('hits', []))} 只，耗时 {res.get('elapsed', 0)}s")
+        if res.get("relaxed"):
+            msg += "（原条件无命中，已自动放宽展示）"
         if res.get("cancelled"):
             msg += "（已中断）"
         self.set_status(msg)
@@ -375,6 +428,10 @@ class PickerPage(QWidget):
                          "<b>持仓风控（出信号后执行）：</b><br>")
                 for no, name, desc in self._res["risk"]:
                     html += f"{no} {name}：{desc}<br>"
+        if self._res and r.get("relaxed") and self._res.get("relaxed_note"):
+            html += (f"<hr style='border:none;border-top:1px solid #E6E8EB'>"
+                     f"<span style='color:{WARN}'>"
+                     f"{self._res['relaxed_note']}</span>")
         self.detail.setHtml(html)
 
     # ---------------- 导出 ----------------

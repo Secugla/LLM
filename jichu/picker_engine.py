@@ -647,7 +647,7 @@ PATTERN_STRATEGY_TAG = {
 }
 
 DEFAULT_CONFIG = {
-    "min_mv": 30.0,          # 总市值下限（亿元）
+    "min_mv": 20.0,          # 总市值下限（亿元，与页面默认全市场预设一致）
     "max_mv": 3000.0,        # 总市值上限（亿元）
     "price_min": 3.0,
     "price_max": 300.0,
@@ -719,8 +719,12 @@ def _filter_candidates(quotes: dict, cfg: dict) -> tuple:
 
 
 def _analyze_pattern(code: str, q: dict, cfg: dict,
-                     strategy: str) -> Optional[dict]:
-    """形态选股：取日线 → 日线/周线形态标签 → 按策略过滤。"""
+                     strategy: str, allow_near: bool = True) -> Optional[dict]:
+    """形态选股：取日线 → 日线/周线形态标签 → 按策略过滤。
+
+    allow_near=True 时，比原条件差一档的标的会以 near=True 返回，
+    供 scan 在主条件无命中时做兜底放宽（保证界面结果不为空）。
+    """
     end = dt.date.today().strftime("%Y%m%d")
     start = (dt.date.today() - dt.timedelta(days=cfg["max_days"])) \
         .strftime("%Y%m%d")
@@ -740,14 +744,22 @@ def _analyze_pattern(code: str, q: dict, cfg: dict,
 
     daily_tags = groups.get("日线形态", [])
     weekly_tags = groups.get("周线形态", [])
+    near = False
 
     if strategy == "pattern":
         if len(tags) < cfg["min_tags"]:
-            return None
+            if (allow_near and cfg["min_tags"] > 1
+                    and len(tags) == cfg["min_tags"] - 1):
+                near = True          # 差一个形态，作为兜底候选
+            else:
+                return None
     else:
         need = PATTERN_STRATEGY_TAG.get(strategy)
         if need and need not in tags:
-            return None
+            if allow_near:
+                near = True          # 指定形态无命中时，保留其它形态标的兜底
+            else:
+                return None
 
     score = _pattern_score(tags)
     tag_count = len(tags)
@@ -771,7 +783,7 @@ def _analyze_pattern(code: str, q: dict, cfg: dict,
         "signal": True, "strategy": strategy,
         "pass_count": tag_count, "total": tag_count,
         "passed": [{"name": t, "detail": d} for t, d in zip(tags, details)],
-        "failed": [], "mode": "pattern",
+        "failed": [], "mode": "pattern", "near": near,
     }
 
 
@@ -884,6 +896,7 @@ def scan(strategy: str = "pattern",
         strict_list = [strategy]
 
     results: List[dict] = []
+    near_results: List[dict] = []      # 差一档的兜底候选（主条件无命中时启用）
     done = 0
     total_tasks = len(cands) * max(1, len(strict_list)) \
         if strict_list else len(cands)
@@ -925,14 +938,59 @@ def scan(strategy: str = "pattern",
             except Exception:
                 got = []
             if got:
-                results.extend(got)
-                batch_acc.extend(got)
+                for x in got:
+                    if x.get("near"):
+                        near_results.append(x)
+                        continue
+                    results.append(x)
+                    batch_acc.append(x)
                 if len(batch_acc) >= 12:
                     emit_batch(batch_acc)
                     batch_acc = []
             if done % 30 == 0 or done == total_tasks:
                 log(f"已扫描 {done}/{total_tasks} · 命中 {len(results)}")
         emit_batch(batch_acc, force=True)
+
+    relaxed_note = ""
+    if not results and near_results:
+        near_results.sort(key=lambda x: (x.get("tag_count", 0),
+                                         x.get("score", 0),
+                                         x.get("change_pct", 0)), reverse=True)
+        for r in near_results:
+            r.pop("near", None)
+            r["relaxed"] = True
+        results = near_results[:60]
+        if strategy == "pattern":
+            relaxed_note = (
+                f"按原条件（形态命中≥{cfg['min_tags']}）无命中，已自动放宽一档："
+                f"展示命中 {max(1, cfg['min_tags'] - 1)} 个及以上形态的最接近标的，"
+                f"信号强度弱于原条件，请谨慎参考")
+        else:
+            relaxed_note = (
+                "该形态当日无完全命中标的，已自动放宽为「其它形态命中」的标的，"
+                "仅作观察参考，请勿按严格信号执行")
+
+    # 兜底二次扫描：仍为空时，把「多形态组合」放宽到 1 个形态重扫
+    # （日线已在上一次扫描中落盘缓存，二次扫描基本不再走网络）
+    if (not results and not strict_list and strategy == "pattern"
+            and cfg["min_tags"] > 1 and not stopped()):
+        log("主条件无命中，按最低 1 个形态兜底重扫…")
+        cfg2 = dict(cfg)
+        cfg2["min_tags"] = 1
+        for code, q in cands:
+            if stopped():
+                break
+            r = _analyze_pattern(code, q, cfg2, strategy, allow_near=False)
+            if r:
+                r.pop("near", None)
+                r["relaxed"] = True
+                results.append(r)
+                if len(results) >= 60:
+                    break
+        if results:
+            relaxed_note = (
+                f"按原条件（形态命中≥{cfg['min_tags']}）无命中，已自动放宽到 1 个形态："
+                "展示具备任一形态的最接近标的，信号强度较弱，请结合行情确认")
 
     results.sort(key=lambda x: (x.get("score", 0), x.get("change_pct", 0)),
                  reverse=True)
@@ -949,6 +1007,7 @@ def scan(strategy: str = "pattern",
         "date": dt.date.today().strftime("%Y-%m-%d"),
         "scanned": done, "candidates": len(cands),
         "hits": results, "risk": risk, "cancelled": cancelled,
+        "relaxed": bool(relaxed_note), "relaxed_note": relaxed_note,
         "elapsed": round(elapsed, 1), "filter_stats": stats,
         "config": cfg,
     }
