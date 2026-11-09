@@ -376,19 +376,19 @@ class BacktestPage(QWidget):
         self.daily_tbl = make_table(
             ["日期", "操作", "代码", "名称", "价格", "数量(股)", "仓位%",
              "现金", "总资产", "说明"])
-        for i, w in enumerate([84, 66, 60, 72, 60, 72, 56, 80, 84]):
+        for i, w in enumerate([88, 68, 64, 84, 64, 76, 60, 82, 86]):
             self.daily_tbl.setColumnWidth(i, w)
         # 交易明细：末列"原因"保留拉伸，其余列合计约 760px
         self.trade_tbl = make_table(
             ["日期", "代码", "名称", "方向", "价格", "数量(股)", "金额",
              "仓位%", "买入日期", "买入价", "盈亏", "原因"])
-        for i, w in enumerate([84, 60, 72, 60, 60, 72, 80, 56, 84, 60, 72]):
+        for i, w in enumerate([88, 64, 84, 96, 64, 78, 86, 60, 86, 64, 86]):
             self.trade_tbl.setColumnWidth(i, w)
-        # 持仓明细：末列"浮动盈亏"是数值，不拉伸；固定合理宽度避免过宽
+        # 持仓明细：列宽加宽，末列"浮动盈亏"拉伸填满剩余宽度
         self.pos_tbl = make_table(
             ["日期", "代码", "名称", "持股数", "价格", "市值",
-             "权重%", "成本", "浮动盈亏"], stretch_last=False)
-        for i, w in enumerate([84, 60, 72, 72, 60, 84, 56, 60, 90]):
+             "权重%", "成本", "浮动盈亏"], stretch_last=True)
+        for i, w in enumerate([88, 64, 96, 84, 64, 96, 64, 66, 96]):
             self.pos_tbl.setColumnWidth(i, w)
         self.diag_tbl = make_table(["维度", "指标", "数值", "说明"])
         for i, w in enumerate([80, 132, 96]):
@@ -914,14 +914,14 @@ class BacktestPage(QWidget):
             t.setItem(rr, 3, cell(d.get("name") or "—", align=Qt.AlignCenter))
             price = d.get("price")
             t.setItem(rr, 4, cell("—" if price is None else f"{price:.2f}",
-                                   align=Qt.AlignCenter,
+                                   align=Qt.AlignRight | Qt.AlignVCenter,
                                    sort_value=price if price is not None else -1))
             sh = d.get("shares")
             t.setItem(rr, 5, cell("—" if sh is None else f"{sh:,}",
-                                   align=Qt.AlignCenter,
+                                   align=Qt.AlignRight | Qt.AlignVCenter,
                                    sort_value=sh if sh is not None else -1))
             t.setItem(rr, 6, cell(f"{d.get('position_pct', 0):.1f}",
-                                   "#2E6FD6", align=Qt.AlignCenter,
+                                   "#2E6FD6", align=Qt.AlignRight | Qt.AlignVCenter,
                                    sort_value=d.get("position_pct", 0)))
             t.setItem(rr, 7, cell(f"{d.get('cash', 0):,.0f}",
                                    align=Qt.AlignRight | Qt.AlignVCenter,
@@ -944,26 +944,26 @@ class BacktestPage(QWidget):
             tt.setItem(rr, 0, cell(d.get("date", ""), TEXT2,
                                     align=Qt.AlignCenter))
             tt.setItem(rr, 1, cell(d.get("code", ""), align=Qt.AlignCenter))
-            tt.setItem(rr, 2, cell(d.get("name", "")))
+            tt.setItem(rr, 2, cell(d.get("name", ""), align=Qt.AlignCenter))
             tt.setItem(rr, 3, cell(side, sc, bold=True, align=Qt.AlignCenter))
             tt.setItem(rr, 4, cell(f"{d.get('price', 0):.2f}",
-                                    align=Qt.AlignCenter,
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("price", 0)))
             tt.setItem(rr, 5, cell(f"{d.get('shares', 0):,}",
-                                    align=Qt.AlignCenter,
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("shares", 0)))
             tt.setItem(rr, 6, cell(f"{d.get('amount', 0):,.0f}",
                                     align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("amount", 0)))
             pct = d.get("position_pct")
             tt.setItem(rr, 7, cell("—" if pct is None else f"{pct:.1f}",
-                                    align=Qt.AlignCenter,
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=pct if pct is not None else -1))
             tt.setItem(rr, 8, cell(d.get("buy_date") or "—",
                                     align=Qt.AlignCenter))
             bp = d.get("buy_price")
             tt.setItem(rr, 9, cell("—" if bp is None else f"{bp:.2f}",
-                                    align=Qt.AlignCenter,
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=bp if bp is not None else -1))
             pnl = d.get("pnl")
             tt.setItem(rr, 10, cell("—" if pnl is None else f"{pnl:+,.0f}",
@@ -984,21 +984,22 @@ class BacktestPage(QWidget):
             pt.setItem(rr, 0, cell(d.get("date", ""), TEXT2,
                                     align=Qt.AlignCenter))
             pt.setItem(rr, 1, cell(d.get("code", ""), align=Qt.AlignCenter))
-            pt.setItem(rr, 2, cell(d.get("name", "")))
+            pt.setItem(rr, 2, cell(d.get("name", ""), align=Qt.AlignCenter))
             pt.setItem(rr, 3, cell(f"{d.get('shares', 0):,}",
                                     align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("shares", 0)))
             pt.setItem(rr, 4, cell(f"{d.get('price', 0):.2f}",
-                                    align=Qt.AlignCenter,
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("price", 0)))
             pt.setItem(rr, 5, cell(f"{d.get('value', 0):,.0f}",
                                     align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("value", 0)))
             w = d.get("weight", 0)
             pt.setItem(rr, 6, cell(f"{w:.1f}", "#2E6FD6",
-                                    align=Qt.AlignCenter, sort_value=w))
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
+                                    sort_value=w))
             pt.setItem(rr, 7, cell(f"{d.get('cost', 0):.2f}",
-                                    align=Qt.AlignCenter,
+                                    align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=d.get("cost", 0)))
             pnl = d.get("pnl")
             pt.setItem(rr, 8, cell("—" if pnl is None else f"{pnl:+,.0f}",
