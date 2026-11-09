@@ -37,6 +37,13 @@ pg.setConfigOption("foreground", TEXT2)
 # 图表页放在页签末尾，避免改动既有数据表的 0~4 索引
 CHART_TAB = 5
 
+
+def _fmt_d(s: str) -> str:
+    """日期展示格式：YYYY-MM-DD → MM/DD/YYYY（月，日，年）。"""
+    s = str(s or "")
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    return f"{m.group(2)}/{m.group(3)}/{m.group(1)}" if m else s
+
 # 股票池上限 → 选股方式说明（池越小越偏向龙头/大票，越大越接近全市场采样）
 POOL_MODE = {
     20: ("龙头精选池",
@@ -377,19 +384,19 @@ class BacktestPage(QWidget):
         self.daily_tbl = make_table(
             ["日期", "操作", "代码", "名称", "价格", "数量(股)", "仓位%",
              "现金", "总资产", "说明"])
-        for i, w in enumerate([88, 68, 64, 84, 64, 76, 60, 82, 86]):
+        for i, w in enumerate([96, 68, 64, 84, 64, 76, 60, 82, 86, 150]):
             self.daily_tbl.setColumnWidth(i, w)
         # 交易明细：末列"原因"保留拉伸，其余列合计约 760px
         self.trade_tbl = make_table(
             ["日期", "代码", "名称", "方向", "价格", "数量(股)", "金额",
              "仓位%", "买入日期", "买入价", "盈亏", "原因"])
-        for i, w in enumerate([88, 64, 84, 96, 64, 78, 86, 60, 86, 64, 86]):
+        for i, w in enumerate([96, 64, 84, 96, 64, 78, 86, 60, 108, 64, 86]):
             self.trade_tbl.setColumnWidth(i, w)
         # 持仓明细：列宽加宽，末列"浮动盈亏"拉伸填满剩余宽度
         self.pos_tbl = make_table(
             ["日期", "代码", "名称", "持股数", "价格", "市值",
              "权重%", "成本", "浮动盈亏"], stretch_last=True)
-        for i, w in enumerate([88, 64, 96, 84, 64, 96, 64, 66, 96]):
+        for i, w in enumerate([96, 64, 96, 84, 64, 96, 64, 66, 96]):
             self.pos_tbl.setColumnWidth(i, w)
         self.diag_tbl = make_table(["维度", "指标", "数值", "说明"])
         for i, w in enumerate([80, 132, 96]):
@@ -409,7 +416,26 @@ class BacktestPage(QWidget):
         pv.setSpacing(6)
         pv.addWidget(self.pos_note)
         pv.addWidget(self.pos_tbl, 1)
-        self.tabs.addTab(self.daily_tbl, "每日操作")
+        # 每日操作：顶部说明下次调仓时间、预选个股与止盈/止损预警
+        self.daily_note = QLabel("运行回测后，这里会说明下一次调仓时间与预选个股")
+        self.daily_note.setObjectName("Hint")
+        self.daily_note.setWordWrap(True)
+        self.preview_btn = QPushButton("刷新预选")
+        self.preview_btn.setObjectName("Ghost")
+        self.preview_btn.setFixedWidth(88)
+        self.preview_btn.setToolTip(
+            "用最新行情重算下一次调仓的预选名单（只展示、不下单）")
+        self.preview_btn.clicked.connect(self.refresh_preview)
+        daily_page = QWidget()
+        dv = QVBoxLayout(daily_page)
+        dv.setContentsMargins(0, 0, 0, 0)
+        dv.setSpacing(6)
+        dn_row = QHBoxLayout()
+        dn_row.addWidget(self.daily_note, 1)
+        dn_row.addWidget(self.preview_btn)
+        dv.addLayout(dn_row)
+        dv.addWidget(self.daily_tbl, 1)
+        self.tabs.addTab(daily_page, "每日操作")
         self.tabs.addTab(self.trade_tbl, "交易明细")
         self.tabs.addTab(pos_page, "持仓明细")
         self.tabs.addTab(self.diag_tbl, "风险诊断")
@@ -530,6 +556,101 @@ class BacktestPage(QWidget):
         lay.addWidget(gw)
         self._popups.append(dlg)
         dlg.show()
+
+    # ---------------- 下次调仓预告 / 预选名单 ----------------
+    def _render_daily_note(self, r, preview=None):
+        """每日操作页顶部：下次调仓时间、预选个股、止盈/止损/新开仓预警。"""
+        if r.get("mode") != "universe":
+            self.daily_note.setText("当前为单票/战法模式，无组合调仓预告")
+            self.preview_btn.setEnabled(False)
+            return
+        self.preview_btn.setEnabled(True)
+        lines = []
+        ns, ne = r.get("next_signal_date") or "", r.get("next_exec_date") or ""
+        if ns:
+            lines.append(
+                f"<b>下一次调仓</b>：{_fmt_d(ns)} 收盘生成名单 → "
+                f"{_fmt_d(ne)} 开盘执行（每 {r.get('rebalance_days', 20)} "
+                f"个交易日一次；名单随最新行情变化，到信号日收盘才最终确定）")
+
+        # 当前未平持仓（含浮动盈亏，用于预警）
+        held = {t["code"]: t for t in (r.get("trades") or [])
+                if t.get("side") == "持仓（未平）"}
+
+        if preview is None:
+            lines.append("<b>预选个股</b>：正在按最新行情重算…")
+        elif preview.get("error"):
+            lines.append(f"<b>预选个股</b>：暂不可用（{preview['error']}）")
+        else:
+            picks = preview.get("picks") or []
+            if picks:
+                segs = []
+                for p in picks:
+                    tag = ""
+                    if p["code"] not in held:
+                        tag = (f" <span style='color:{WARN}'>[新开仓预警]</span>")
+                    segs.append(
+                        f"{p['rank']}. {p['name']}({p['code']}) "
+                        f"{p['total']:.0f}分{tag}")
+                lines.append(
+                    f"<b>预选个股</b>（按 {_fmt_d(preview.get('as_of') or '')} "
+                    f"最新数据，池 {preview.get('pool_selected', 0)} 只）："
+                    + "；".join(segs))
+            else:
+                lines.append("<b>预选个股</b>：最新行情下无满足分数门槛的标的")
+
+        # 止盈/止损预警（基于未平持仓的浮动盈亏）
+        warns = []
+        for t in held.values():
+            rp = float(t.get("return_pct") or 0)
+            nm = f"{t.get('name') or t['code']}({t['code']})"
+            if rp <= -8:
+                warns.append(
+                    f"<span style='color:{DOWN}'>止损预警 {nm} 浮亏 "
+                    f"{rp:+.1f}%，接近 -12% 止损线</span>")
+            elif rp >= 20:
+                warns.append(
+                    f"<span style='color:{UP}'>止盈提示 {nm} 浮盈 "
+                    f"{rp:+.1f}%，可在本次调仓获利了结</span>")
+        if warns:
+            lines.append("<b>持仓预警</b>：" + "；".join(warns))
+        self.daily_note.setText("<br>".join(lines))
+
+    def refresh_preview(self, silent: bool = False):
+        """用最新行情重算下一次调仓预选名单（只展示、不下单）。"""
+        p = getattr(self, "_preview_params", None)
+        r = getattr(self, "_bt_result", None)
+        if not p or not r or r.get("mode") != "universe":
+            return
+        if getattr(self, "_preview_running", False):
+            return
+        self._preview_running = True
+        self.preview_btn.setEnabled(False)
+        if not silent:
+            self.set_status("正在按最新行情重算调仓预选…")
+        w = Worker(lambda prog: backtest_service.preview_next_picks(
+            **p, progress=prog))
+        w.done.connect(lambda pv: self._on_preview(pv, silent))
+        w.error.connect(lambda msg: self._on_preview(
+            {"error": str(msg)[:80], "picks": []}, silent))
+        w.finished.connect(self._on_preview_finished)
+        self._workers.append(w)
+        w.start()
+
+    def _on_preview(self, pv, silent: bool):
+        self._preview_running = False
+        self.preview_btn.setEnabled(True)
+        r = getattr(self, "_bt_result", None)
+        if r:
+            self._render_daily_note(r, preview=pv)
+        if not silent:
+            n = len((pv or {}).get("picks") or [])
+            self.set_status(f"调仓预选已更新：{n} 只")
+
+    def _on_preview_finished(self):
+        self._preview_running = False
+        self.preview_btn.setEnabled(True)
+        self._workers = [x for x in self._workers if x.isRunning()]
 
     # ---------------- 实时行情（全局被动刷新，3 秒） ----------------
     def live_codes(self):
@@ -821,6 +942,11 @@ class BacktestPage(QWidget):
                           max_position=int(self.pool_pos.currentData()) / 100,
                           max_price=60.0 if self.price_cb.isChecked() else None,
                           exclude_star_bse=self.star_cb.isChecked())
+            self._preview_params = dict(
+                strategy_id=sid, top_n=int(self.topn.currentData()),
+                pool_size=int(self.pool.currentData()),
+                max_price=params["max_price"],
+                exclude_star_bse=params["exclude_star_bse"])
             if mode == "pool":
                 def fn(progress=None, cancel=None):
                     r = backtest_service.run_universe(
@@ -841,6 +967,7 @@ class BacktestPage(QWidget):
         self.progress.setVisible(True)
         self.set_status(f"开始{desc}…")
         skeleton_table(self.daily_tbl, 5, "回测运行中…")
+        self.daily_note.setText("回测运行中…下一次调仓时间与预选个股稍后显示")
         self.pos_note.setText("回测运行中…最近一次调仓/止损操作将在持仓明细页顶部说明")
         skeleton_table(self.trade_tbl, 5, "回测运行中…")
         skeleton_table(self.diag_tbl, 5, "回测运行中…")
@@ -938,7 +1065,8 @@ class BacktestPage(QWidget):
         for d in r["daily"]:
             rr = t.rowCount()
             t.insertRow(rr)
-            t.setItem(rr, 0, cell(d["date"], TEXT2, align=Qt.AlignCenter))
+            t.setItem(rr, 0, cell(_fmt_d(d["date"]), TEXT2,
+                                   align=Qt.AlignCenter))
             ac = d.get("action", "")
             if "买入" in ac and "卖出" in ac:
                 ac_c = WARN
@@ -981,7 +1109,7 @@ class BacktestPage(QWidget):
             tt.insertRow(rr)
             side = d.get("side", "")
             sc = UP if side == "买入" else (DOWN if side == "卖出" else WARN)
-            tt.setItem(rr, 0, cell(d.get("date", ""), TEXT2,
+            tt.setItem(rr, 0, cell(_fmt_d(d.get("date", "")), TEXT2,
                                     align=Qt.AlignCenter))
             tt.setItem(rr, 1, cell(d.get("code", ""), align=Qt.AlignCenter))
             tt.setItem(rr, 2, cell(d.get("name", ""), align=Qt.AlignCenter))
@@ -999,7 +1127,7 @@ class BacktestPage(QWidget):
             tt.setItem(rr, 7, cell("—" if pct is None else f"{pct:.1f}",
                                     align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=pct if pct is not None else -1))
-            tt.setItem(rr, 8, cell(d.get("buy_date") or "—",
+            tt.setItem(rr, 8, cell(_fmt_d(d.get("buy_date") or "—"),
                                     align=Qt.AlignCenter))
             bp = d.get("buy_price")
             tt.setItem(rr, 9, cell("—" if bp is None else f"{bp:.2f}",
@@ -1021,7 +1149,7 @@ class BacktestPage(QWidget):
         for d in pos:
             rr = pt.rowCount()
             pt.insertRow(rr)
-            pt.setItem(rr, 0, cell(d.get("date", ""), TEXT2,
+            pt.setItem(rr, 0, cell(_fmt_d(d.get("date", "")), TEXT2,
                                     align=Qt.AlignCenter))
             pt.setItem(rr, 1, cell(d.get("code", ""), align=Qt.AlignCenter))
             pt.setItem(rr, 2, cell(d.get("name", ""), align=Qt.AlignCenter))
@@ -1048,6 +1176,11 @@ class BacktestPage(QWidget):
                                     sort_value=pnl if pnl is not None else 0))
         pt.setSortingEnabled(True)
         self._render_pos_note(r)
+        # 每日操作页顶部：下次调仓时间 + 预选名单（回测完成后自动按最新行情重算）
+        self._bt_result = r
+        self._render_daily_note(r, preview=None)
+        if r.get("mode") == "universe" and getattr(self, "_preview_params", None):
+            self.refresh_preview(silent=True)
 
         # 风险诊断：风险分析 + 稳健性检验 + 交易成本
         es = r.get("exec_stats") or {}

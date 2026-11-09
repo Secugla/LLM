@@ -1066,6 +1066,7 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
         except Exception:
             seat_maps = {}
 
+    signal_marks = []        # 记录每次调仓信号的下标，用于推算下次调仓日
     for i, date in enumerate(dates):
         stopped()
         executed = []
@@ -1147,6 +1148,7 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
 
         # 收盘后生成下一交易日调仓目标
         if i < len(dates) - 1 and i % max(1, rebalance_days) == 0:
+            signal_marks.append(i)
             ds = date.strftime("%Y-%m-%d")
             fund = None
             if fund_data:
@@ -1190,6 +1192,22 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
     curve_df = pd.DataFrame(curve)
     closed = [t["pnl"] for t in trades if t["side"] == "卖出"]
     metrics = _metrics(curve_df, init_cash, closed, fees_total)
+
+    # 推算下一次调仓：信号在 last_signal + rebalance_days 日收盘生成，
+    # 再下一个交易日开盘执行；超出样本区间时用工作日序列外推（近似）。
+    next_signal_date, next_exec_date = "", ""
+    if signal_marks:
+        nxt = signal_marks[-1] + max(1, rebalance_days)
+        if nxt < len(dates):
+            next_signal_date = dates[nxt].strftime("%Y-%m-%d")
+        else:
+            extra = pd.bdate_range(dates[-1], periods=nxt - len(dates) + 2)
+            next_signal_date = extra[-1].strftime("%Y-%m-%d")
+        try:
+            exec_d = pd.bdate_range(pd.Timestamp(next_signal_date), periods=2)[-1]
+            next_exec_date = exec_d.strftime("%Y-%m-%d")
+        except Exception:
+            next_exec_date = ""
     return {
         "mode": "universe", "mode_name": "全市场·多因子组合",
         "strategy_id": strategy_id, "strategy_name": strat["name"],
@@ -1197,6 +1215,8 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
         "end": curve[-1]["date"], "init_cash": init_cash, "months": months,
         "top_n": top_n, "pool_size": pool_size,
         "rebalance_days": rebalance_days,
+        "next_signal_date": next_signal_date,
+        "next_exec_date": next_exec_date,
         "universe_total": len(quotes), "pool_selected": len(pool),
         "loaded": len(data), "industry_cap": industry_cap,
         "neutralize": neutralize, "exec_constraints": exec_constraints,
@@ -1208,6 +1228,54 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
         "factor_meta": {k: round(v, 1) for k, v in weights.items()},
         "disclaimer": "免费数据源限制下，股票池为全市场筛选后的流动性前 N 只；"
                       "历史新闻不可回溯，信息面用行业动量与量价代理。",
+    }
+
+
+def preview_next_picks(strategy_id: str = "high_flyer", top_n: int = 5,
+                       pool_size: int = 50, max_price: Optional[float] = None,
+                       exclude_star_bse: bool = False,
+                       progress: Optional[Callable[[str], None]] = None) -> dict:
+    """用最新行情重算下一次调仓的预选名单。
+
+    与正式调仓同一套打分（_score_universe_at，取最新交易日截面），
+    结果只用于展示与预警，不会真正下单；随行情刷新而变化。
+    """
+    from data_sources import fetch_all_quotes
+    strat = SL.get_strategy(strategy_id)
+    industry_cap = int(strat["params"].get("industry_cap", 3))
+    min_score = float(strat["params"].get("min_score", 40))
+    quotes = fetch_all_quotes()
+    if not quotes:
+        return {"picks": [], "as_of": "", "error": "实时行情不可用"}
+    pool = _load_pool(quotes, pool_size, max_price, exclude_star_bse)
+    end = _today()
+    start = end - pd.Timedelta(days=400)
+    data = _fetch_pool_daily(pool, start, end, progress,
+                             threading.Event())
+    picks, universe_n = _score_universe_at(end, data, quotes, strat["weights"])
+    as_of = ""
+    if data:
+        as_of = max(h.index[-1] for h in data.values()).strftime("%Y-%m-%d")
+    # 与正式调仓相同：分数门槛 + 行业分散上限
+    chosen, industry_count = [], {}
+    for p in picks:
+        if p["total"] < min_score:
+            continue
+        ind = p["industry"]
+        if industry_count.get(ind, 0) >= industry_cap:
+            continue
+        chosen.append(p)
+        industry_count[ind] = industry_count.get(ind, 0) + 1
+        if len(chosen) >= top_n:
+            break
+    return {
+        "as_of": as_of,
+        "pool_selected": len(pool), "universe": universe_n,
+        "picks": [
+            {"rank": i + 1, "code": p["code"], "name": p["name"],
+             "industry": p.get("industry", ""), "total": round(p["total"], 3)}
+            for i, p in enumerate(chosen)
+        ],
     }
 
 
