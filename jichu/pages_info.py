@@ -7,16 +7,17 @@
   · 涨停池/行业/新闻均为可滚动表格且表头固定，行高与字号统一；
   · 实时抓取失败时保留上次缓存内容并在顶部标注，不阻塞其他区块。
 """
+import datetime as dt
 from typing import Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QSplitter, QComboBox,
                                QDialog, QProgressBar)
 
 from ui_common import (UP, DOWN, FLAT, TEXT2, CAT_COLOR, card,
-                       StreamWorker, make_table, cell, pct_color, fmt_amount,
-                       skeleton_table)
+                       StreamWorker, Worker, make_table, cell, pct_color,
+                       fmt_amount, skeleton_table)
 import market_info
 
 
@@ -278,6 +279,43 @@ class MarketInfoPage(QWidget):
             v = indices.get(nm)
             if v:
                 c.set_data(nm, v["price"], v["change_pct"])
+
+    # ---------------- 指数被动刷新（交易时段每 3 秒） ----------------
+    def start_index_feed(self, interval_ms: int = 3000):
+        if getattr(self, "_idx_timer", None) is not None:
+            return
+        self._idx_busy = False
+        self._idx_workers = []
+        self._idx_timer = QTimer(self)
+        self._idx_timer.setInterval(interval_ms)
+        self._idx_timer.timeout.connect(self._tick_indices)
+        self._idx_timer.start()
+
+    def _tick_indices(self):
+        if self._idx_busy:
+            return
+        now = dt.datetime.now()
+        if now.weekday() >= 5:
+            return
+        t = now.hour * 100 + now.minute
+        if not ((930 <= t <= 1130) or (1300 <= t <= 1500)):
+            return
+        self._idx_busy = True
+        w = Worker(lambda _p: market_info.fetch_indices())
+        w.done.connect(self._on_index_tick)
+        w.error.connect(self._on_index_fail)
+        w.finished.connect(w.deleteLater)
+        self._idx_workers = [x for x in self._idx_workers if x.isRunning()]
+        self._idx_workers.append(w)
+        w.start()
+
+    def _on_index_fail(self, _msg=""):
+        self._idx_busy = False
+
+    def _on_index_tick(self, data):
+        self._idx_busy = False
+        if data:
+            self._render_indices(data)
 
     def _render_sentiment(self, s: dict):
         if not s:

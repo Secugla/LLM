@@ -16,6 +16,7 @@ from typing import Callable
 
 import numpy as np
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QProgressBar,
                                QComboBox, QStackedWidget, QTabWidget,
@@ -530,6 +531,40 @@ class BacktestPage(QWidget):
         self._popups.append(dlg)
         dlg.show()
 
+    # ---------------- 实时行情（全局被动刷新，3 秒） ----------------
+    def live_codes(self):
+        return list(getattr(self, "_live_hint", {}) or {})
+
+    def apply_live(self, quotes: dict):
+        """只刷新最新持仓的价格/市值/浮动盈亏，不重跑回测。"""
+        hint = getattr(self, "_live_hint", None) or {}
+        last_pd = getattr(self, "_live_date", "")
+        if not hint or not quotes:
+            return
+        for row in range(self.pos_tbl.rowCount()):
+            dit = self.pos_tbl.item(row, 0)
+            cit = self.pos_tbl.item(row, 1)
+            if dit is None or cit is None or dit.text() != last_pd:
+                continue
+            q = quotes.get(cit.text())
+            h = hint.get(cit.text())
+            if not q or not q.get("price") or not h:
+                continue
+            px = float(q["price"])
+            shares, cost = h["shares"], h["cost"]
+            val = shares * px
+            pnl = val - cost * shares
+            c4 = self.pos_tbl.item(row, 4)
+            if c4 is not None:
+                c4.setText(f"{px:.2f}")
+            c5 = self.pos_tbl.item(row, 5)
+            if c5 is not None:
+                c5.setText(f"{val:,.0f}")
+            c8 = self.pos_tbl.item(row, 8)
+            if c8 is not None:
+                c8.setText(f"{pnl:+,.0f}")
+                c8.setForeground(QColor(pct_color(pnl)))
+
     def _render_pos_note(self, r):
         """持仓明细页顶部：说明最新一次持仓操作（时点、买卖、止盈/止损、继续持有）。"""
         def tag_name(t):
@@ -578,6 +613,11 @@ class BacktestPage(QWidget):
         if pos:
             last_pd = max(p.get("date", "") for p in pos)
             held = [p for p in pos if p.get("date") == last_pd]
+            self._live_date = last_pd
+            self._live_hint = {
+                str(p.get("code")): {"shares": float(p.get("shares") or 0),
+                                     "cost": float(p.get("cost") or 0)}
+                for p in held}
             if held:
                 items = []
                 for p in held[:8]:

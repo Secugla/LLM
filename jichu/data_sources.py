@@ -582,6 +582,8 @@ def _quotes_from_tencent(codes: list, workers: int = 6) -> dict:
                 code = f[2]
                 quotes[code] = {
                     "code": code, "name": f[1], "price": _f(f[3]),
+                    "prev_close": _f(f[4]), "open": _f(f[5]),
+                    "high": _f(f[33]), "low": _f(f[34]),
                     "change_pct": round(_f(f[32]), 2),
                     "amount": _f(f[37], 1e4),       # 万元 → 元
                     "volume": _f(f[6]),
@@ -600,6 +602,20 @@ def _quotes_from_tencent(codes: list, workers: int = 6) -> dict:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(fetch_batch, batches))
     return quotes
+
+
+def fetch_quotes_batch(codes: list) -> dict:
+    """按代码批量取实时报价（腾讯，50 只/请求），供界面秒级刷新。
+
+    只返回请求成功且有价格的股票，字段与 fetch_all_quotes 一致。
+    """
+    codes = [str(c) for c in codes if len(str(c)) == 6 and str(c).isdigit()]
+    if not codes:
+        return {}
+    try:
+        return _quotes_from_tencent(codes, workers=3)
+    except Exception:
+        return {}
 
 
 def _fallback_code_list() -> list:

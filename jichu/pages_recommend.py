@@ -16,6 +16,7 @@ import os
 from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QSplitter, QTextBrowser,
                                QComboBox, QProgressBar, QFileDialog)
@@ -393,6 +394,31 @@ class RecommendPage(QWidget):
         self.ladder_tbl.setSortingEnabled(True)
         if res.get("picks"):
             self.pick_tbl.selectRow(0)
+
+    # ---------------- 实时行情（全局被动刷新，3 秒） ----------------
+    def live_codes(self):
+        return [str(p.get("code")) for p in self._row_picks.values()
+                if p.get("code")]
+
+    def apply_live(self, quotes: dict):
+        if not self._row_picks:
+            return
+        for row, p in self._row_picks.items():
+            if row >= self.pick_tbl.rowCount():
+                continue
+            q = (quotes or {}).get(str(p.get("code")))
+            if not q or not q.get("price"):
+                continue
+            px = float(q["price"])
+            chg = float(q.get("change_pct") or 0)
+            p["price"], p["change_pct"] = px, chg
+            c4 = self.pick_tbl.item(row, 4)
+            if c4 is not None:
+                c4.setText(f"{px:.2f}")
+            c5 = self.pick_tbl.item(row, 5)
+            if c5 is not None:
+                c5.setText(f"{chg:+.2f}")
+                c5.setForeground(QColor(pct_color(chg)))
 
     def _show_pick_reason(self):
         rows = self.pick_tbl.selectionModel().selectedRows()

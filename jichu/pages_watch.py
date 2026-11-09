@@ -18,6 +18,7 @@ import numpy as np
 import pyqtgraph as pg
 import requests
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QLineEdit, QSplitter,
                                QTextBrowser, QProgressBar, QHeaderView, QDialog,
@@ -90,17 +91,28 @@ class IntradayDialog(QDialog):
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
         top = QHBoxLayout()
+        self.quote_lbl = QLabel("")
+        self.quote_lbl.setStyleSheet(
+            f"color:{TEXT}; font-size:15px; font-weight:600;")
         self.info = QLabel("正在加载分时与买卖点…")
         self.info.setWordWrap(True)
         self.info.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
         self.reload_btn = QPushButton("重新加载")
         self.reload_btn.clicked.connect(self._load)
+        top.addWidget(self.quote_lbl)
         top.addWidget(self.info, 1)
         top.addWidget(self.reload_btn)
         lay.addLayout(top)
         self.gw = pg.GraphicsLayoutWidget()
         self.gw.setStyleSheet(f"border:1px solid {BORDER}; border-radius:6px;")
         lay.addWidget(self.gw, 1)
+        # 盘中每 3 秒刷新现价（被动刷新，与主窗口同一节奏）
+        self._quote_busy = False
+        self._price_line = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(3000)
+        self._timer.timeout.connect(self._auto_tick)
+        self._timer.start()
         self._load()
 
     # ---------- 取数 ----------
@@ -145,6 +157,45 @@ class IntradayDialog(QDialog):
     def _on_error(self, msg):
         self.info.setText(f"加载失败：{msg}")
 
+    def _auto_tick(self):
+        """盘中每 3 秒刷新一次现价与信息条（不重画整张图）。"""
+        if not self.isVisible() or self._quote_busy:
+            return
+        now = dt.datetime.now()
+        if now.weekday() >= 5:
+            return
+        t = now.hour * 100 + now.minute
+        if not ((930 <= t <= 1130) or (1300 <= t <= 1500)):
+            return
+        self._quote_busy = True
+        w = Worker(lambda _p: data_sources.fetch_realtime_snapshot(self.code))
+        w.done.connect(self._apply_tick)
+        w.error.connect(self._tick_failed)
+        _LIVE_WORKERS.add(w)
+        w.finished.connect(lambda: _LIVE_WORKERS.discard(w))
+        self._workers.append(w)
+        w.start()
+
+    def _tick_failed(self, _msg=""):
+        self._quote_busy = False
+
+    def _apply_tick(self, snap):
+        self._quote_busy = False
+        if not snap or not snap.get("price"):
+            return
+        px = float(snap["price"])
+        chg = float(snap.get("change_pct") or 0)
+        tm = snap.get("quote_time") or ""
+        self.quote_lbl.setText(f"{px:.2f}  {chg:+.2f}%  {tm}")
+        self.quote_lbl.setStyleSheet(
+            f"color:{pct_color(chg)}; font-size:15px; font-weight:600;")
+        if self._price_line is not None:
+            self._price_line.setPos(px)
+            try:
+                self._price_line.label.setText(f"现价 {px:.2f}")
+            except Exception:
+                pass
+
     # ---------- 渲染 ----------
     def _render(self, data):
         snap = data.get("snap") or {}
@@ -153,6 +204,13 @@ class IntradayDialog(QDialog):
                   if daily is not None and len(daily) >= 61 else [])
 
         nm = snap.get("name") or self.name
+        if snap.get("price"):
+            px = float(snap["price"])
+            chg = float(snap.get("change_pct") or 0)
+            self.quote_lbl.setText(
+                f"{px:.2f}  {chg:+.2f}%  {snap.get('quote_time') or ''}")
+            self.quote_lbl.setStyleSheet(
+                f"color:{pct_color(chg)}; font-size:15px; font-weight:600;")
         parts = []
         if snap.get("price"):
             parts.append(
@@ -220,10 +278,11 @@ class IntradayDialog(QDialog):
 
         # 当日快照叠加：现价 / 昨收 水平线，并在日界处画分隔线
         pc = float(snap.get("price") or closes[-1])
-        p1.addItem(pg.InfiniteLine(
+        self._price_line = pg.InfiniteLine(
             pos=pc, angle=0, pen=pg.mkPen(UP, width=1.2),
             label=f"现价 {pc:.2f}",
-            labelOpts={"position": 0.05, "color": UP}))
+            labelOpts={"position": 0.05, "color": UP})
+        p1.addItem(self._price_line)
         prev = float(snap.get("prev_close") or 0)
         if prev > 0:
             p1.addItem(pg.InfiniteLine(
@@ -507,6 +566,37 @@ class WatchlistPage(QWidget):
         else:
             self.tbl.setRowCount(0)
             self.detail.clear()
+
+    # ---------------- 实时行情（全局被动刷新，3 秒） ----------------
+    def live_codes(self):
+        return [str(x.get("code")) for x in self.items if x.get("code")]
+
+    def apply_live(self, quotes: dict):
+        """只更新现价与涨幅，不重算指标，避免盘中频繁计算。"""
+        if not self.items or self.tbl.rowCount() == 0:
+            return
+        for row in range(self.tbl.rowCount()):
+            it = self.tbl.item(row, 0)
+            if it is None:
+                continue
+            code = it.text()
+            q = (quotes or {}).get(code)
+            if not q or not q.get("price"):
+                continue
+            px = float(q["price"])
+            chg = float(q.get("change_pct") or 0)
+            cellp = self.tbl.item(row, 2)
+            if cellp is not None:
+                cellp.setText(f"{px:.2f}  {chg:+.2f}%")
+                cellp.setForeground(QColor(pct_color(chg) if chg else TEXT))
+            for s in self.signals:
+                if str(s.get("code")) == code:
+                    s["price"] = px
+                    s["change_pct"] = chg
+                    s["quote_note"] = "盘中实时"
+                    break
+        if self.tbl.currentRow() >= 0:
+            self._show_detail()
 
     def open_intraday(self):
         """打开选中个股的分时窗口（也可双击表格行）。"""

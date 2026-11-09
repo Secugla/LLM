@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
                                QMainWindow, QPushButton, QVBoxLayout, QWidget,
                                QButtonGroup, QStatusBar, QScrollArea)
 
+from live_feed import LiveFeed
+
 from pages_backtest import BacktestPage
 from pages_info import MarketInfoPage
 from pages_lab import QuantLabPage
@@ -220,7 +222,11 @@ class MainWindow(QMainWindow):
         self.status_lbl = QLabel("准备就绪")
         self.clock_lbl = QLabel("")
         self.clock_lbl.setStyleSheet("color:#9AA4B2;")
+        self.live_lbl = QLabel("")
+        self.live_lbl.setStyleSheet("color:#2E6FD6;")
+        self.live_lbl.setToolTip("全局行情被动刷新：交易时段每 3 秒更新各页现价")
         sb.addWidget(self.status_lbl, 1)
+        sb.addPermanentWidget(self.live_lbl)
         sb.addPermanentWidget(self.clock_lbl)
         self.setStatusBar(sb)
 
@@ -292,6 +298,26 @@ class MainWindow(QMainWindow):
         self.auto_timer.timeout.connect(self._check_auto_generate)
         self.auto_timer.start(30_000)
         QTimer.singleShot(5_000, self._check_auto_generate)
+
+        # 全局行情推送：各页面实现 live_codes()/apply_live()，每 3 秒被动刷新
+        self.live = LiveFeed(3000, self)
+        for page in self.pages:
+            if callable(getattr(page, "live_codes", None)):
+                self.live.register(page.live_codes)
+        self.live.updated.connect(self._on_live_quotes)
+        self.live.start()
+        self.info_page.start_index_feed(3000)
+
+    def _on_live_quotes(self, quotes: dict, ts: str):
+        """把最新报价广播给所有页面（只刷展示，不重算模型）。"""
+        for page in self.pages:
+            fn = getattr(page, "apply_live", None)
+            if callable(fn):
+                try:
+                    fn(quotes)
+                except Exception:
+                    continue
+        self.live_lbl.setText(f"行情 {ts}")
 
     def _tick(self):
         self.clock_lbl.setText(

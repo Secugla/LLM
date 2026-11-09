@@ -13,6 +13,7 @@ import threading
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QComboBox, QSplitter,
                                QTextBrowser, QProgressBar, QFileDialog)
@@ -380,6 +381,45 @@ class PickerPage(QWidget):
         self._on_finished()
 
     # ---------------- 明细 ----------------
+    # ---------------- 实时行情（全局被动刷新，3 秒） ----------------
+    def live_codes(self):
+        out = []
+        for row in range(self.tbl.rowCount()):
+            it = self.tbl.item(row, 1)
+            if it is not None and it.text():
+                out.append(it.text())
+        return out
+
+    def apply_live(self, quotes: dict):
+        if not quotes:
+            return
+        for row in range(self.tbl.rowCount()):
+            it = self.tbl.item(row, 1)
+            if it is None:
+                continue
+            q = quotes.get(it.text())
+            if not q or not q.get("price"):
+                continue
+            px = float(q["price"])
+            chg = float(q.get("change_pct") or 0)
+            r = self.tbl.item(row, 0)
+            data = r.data(Qt.UserRole) if r is not None else None
+            if isinstance(data, dict):
+                data["price"], data["change_pct"] = px, chg
+                if q.get("turnover") is not None:
+                    data["turnover"] = q["turnover"]
+            c4 = self.tbl.item(row, 4)
+            if c4 is not None:
+                c4.setText(f"{px:.2f}")
+            c5 = self.tbl.item(row, 5)
+            if c5 is not None:
+                c5.setText(f"{chg:+.2f}")
+                c5.setForeground(QColor(pct_color(chg)))
+            if q.get("turnover") is not None:
+                c8 = self.tbl.item(row, 8)
+                if c8 is not None:
+                    c8.setText(f"{float(q['turnover']):.1f}")
+
     def _show_detail(self):
         rows = self.tbl.selectionModel().selectedRows()
         if not rows:
