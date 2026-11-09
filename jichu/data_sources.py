@@ -696,6 +696,9 @@ def fetch_realtime_snapshot(symbol: str) -> dict:
             "price": price, "high": float(f[4]), "low": float(f[5]),
             "volume": float(f[8]), "amount": float(f[9]),
             "change_pct": round((price / prev - 1) * 100, 2) if prev else 0,
+            # 新浪最后两个字段为行情日期与时间，用于判断是否为当日盘中数据
+            "quote_date": f[30] if len(f) > 30 else "",
+            "quote_time": f[31] if len(f) > 31 else "",
         }
     except Exception:
         # 东财兜底

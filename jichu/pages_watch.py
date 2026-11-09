@@ -17,10 +17,11 @@ from typing import Callable, List
 import numpy as np
 import pyqtgraph as pg
 import requests
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QLineEdit, QSplitter,
-                               QTextBrowser, QProgressBar, QHeaderView, QDialog)
+                               QTextBrowser, QProgressBar, QHeaderView, QDialog,
+                               QCheckBox)
 
 from ui_common import (UP, DOWN, FLAT, TEXT, TEXT2, CARD, BORDER, Worker,
                        make_table, cell, pct_color, skeleton_table)
@@ -317,6 +318,23 @@ class WatchlistPage(QWidget):
         if self.items:
             self.refresh_signals()
 
+    @staticmethod
+    def _in_trading_session() -> bool:
+        """是否处于 A 股连续竞价时段（周一至周五 9:30-11:30、13:00-15:00）。"""
+        now = dt.datetime.now()
+        if now.weekday() >= 5:
+            return False
+        t = now.hour * 100 + now.minute
+        return (930 <= t <= 1130) or (1300 <= t <= 1500)
+
+    def _tick_auto(self):
+        """盘中定时刷新：仅交易时段、且当前没有在算时才触发。"""
+        if not self.auto_cb.isChecked() or not self._in_trading_session():
+            return
+        if any(w.isRunning() for w in self._workers):
+            return
+        self.refresh_signals(silent=True)
+
     # ---------- 清单持久化（原子写入） ----------
     def _load(self):
         if os.path.exists(WATCH_FILE):
@@ -381,6 +399,10 @@ class WatchlistPage(QWidget):
         self.refresh_btn = QPushButton("刷新买卖信号")
         self.refresh_btn.setObjectName("Primary")
         self.refresh_btn.clicked.connect(self.refresh_signals)
+        self.auto_cb = QCheckBox("盘中自动刷新")
+        self.auto_cb.setChecked(True)
+        self.auto_cb.setToolTip(
+            "交易时段内每 60 秒自动拉取最新价与信号（收盘/非交易时段不刷新）")
         bl.addWidget(QLabel("自选："))
         bl.addWidget(self.input)
         bl.addWidget(add_btn)
@@ -391,9 +413,15 @@ class WatchlistPage(QWidget):
         self.progress.setFixedWidth(140)
         self.progress.setVisible(False)
         bl.addWidget(self.progress)
+        bl.addWidget(self.auto_cb)
         bl.addWidget(self.intraday_btn)
         bl.addWidget(self.refresh_btn)
         root.addWidget(bar)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(60000)
+        self._timer.timeout.connect(self._tick_auto)
+        self._timer.start()
 
         # 市场环境 + 信号规则说明（信号计算方式透明化）
         self.env_lbl = QLabel(
@@ -405,7 +433,7 @@ class WatchlistPage(QWidget):
 
         split = QSplitter(Qt.Vertical)
         self.tbl = make_table(
-            ["代码", "名称", "现价", "信号", "置信度", "多空分",
+            ["代码", "名称", "现价 / 涨幅%", "信号", "置信度", "多空分",
              "RSI", "量比", "近5日%", "近20日%"], stretch_last=False)
         self.tbl.setColumnWidth(0, 70)
         self.tbl.setColumnWidth(1, 100)
@@ -507,14 +535,16 @@ class WatchlistPage(QWidget):
         self._dialogs.append(dlg)
         dlg.show()
 
-    def refresh_signals(self):
+    def refresh_signals(self, silent: bool = False):
         if not self.items:
             self.tbl.setRowCount(0)
             self.detail.clear()
             return
-        self.refresh_btn.setEnabled(False)
-        self.progress.setVisible(True)
-        self.set_status("正在计算自选股买卖信号…")
+        self._silent = bool(silent)
+        if not silent:
+            self.refresh_btn.setEnabled(False)
+            self.progress.setVisible(True)
+            self.set_status("正在计算自选股买卖信号…")
         if not self.signals:
             skeleton_table(self.tbl, max(2, len(self.items)), "正在计算信号…")
         items = [dict(x) for x in self.items]
@@ -563,8 +593,14 @@ class WatchlistPage(QWidget):
             self.tbl.setItem(r, 0, cell(s["code"], align=Qt.AlignCenter))
             self.tbl.item(r, 0).setData(Qt.UserRole, s)
             self.tbl.setItem(r, 1, cell(s["name"], bold=True))
-            self.tbl.setItem(r, 2, cell(s["price"], align=Qt.AlignCenter,
-                                         sort_value=s["price"]))
+            chg = float(s.get("change_pct") or 0)
+            self.tbl.setItem(r, 2, cell(
+                f"{s['price']:.2f}  {chg:+.2f}%",
+                pct_color(chg) if chg else TEXT,
+                align=Qt.AlignCenter, sort_value=s["price"]))
+            self.tbl.item(r, 2).setToolTip(
+                f"现价 {s['price']:.2f}，当日 {chg:+.2f}%"
+                + (f"（{s.get('quote_note')}）" if s.get("quote_note") else ""))
             sig = s["signal"]
             self.tbl.setItem(r, 3, cell(sig, _SIG_COLOR.get(sig, FLAT),
                                          bold=True, align=Qt.AlignCenter))
@@ -590,13 +626,15 @@ class WatchlistPage(QWidget):
                                         align=Qt.AlignCenter,
                                         sort_value=ind["ret20"]))
         self.tbl.setSortingEnabled(True)
-        self.set_status(f"自选信号已刷新：{len(sigs)} 只")
-        self.tbl.selectRow(0)
+        if not getattr(self, "_silent", False):
+            self.set_status(f"自选信号已刷新：{len(sigs)} 只")
+            self.tbl.selectRow(0)
 
     def _render_env(self, env):
         """自选页顶部的市场环境与信号规则说明。"""
         rule = ("信号 = 日线技术面加权（均线±4.5、MACD±2、RSI±1.5、"
-                "布林/量能/动量各±1）；收盘后形成、次日执行")
+                "布林/量能/动量各±1）；收盘后形成、次日执行；"
+                "盘中价格与涨幅按实时快照更新（默认每 60 秒）")
         if not env:
             self.env_lbl.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
             self.env_lbl.setText("市场环境未获取：信号仅按技术面计算。" + rule)
@@ -625,6 +663,11 @@ class WatchlistPage(QWidget):
         html += f"{s['code']} {s['name']} → {sig}</b>"
         html += (f"（置信度 {s['confidence']:.0%}，总分 {s['score']:+.1f}"
                  f" = 技术分 {raw:+.1f} + 环境修正 {bias:+.2f}）<br>")
+        chg = float(s.get("change_pct") or 0)
+        note = s.get("quote_note") or "收盘价"
+        html += (f"现价 {s['price']:.2f}，当日 "
+                 f"<span style='color:{pct_color(chg)}'>{chg:+.2f}%</span>"
+                 f"（{note}）<br>")
         env = s.get("market") or {}
         if env:
             html += (f"<span style='color:{TEXT2}'>市场环境："

@@ -282,6 +282,67 @@ class StockSignal:
     score_raw: float = 0.0       # 未经市场环境修正的技术总分
     env_bias: float = 0.0        # 市场环境修正分
     market: dict = field(default_factory=dict)   # 市场环境快照
+    change_pct: float = 0.0      # 当日涨跌幅（盘中为实时）
+    quote_note: str = ""         # 行情时点说明（如「盘中实时 14:32」）
+
+
+def _overlay_snapshot(df: pd.DataFrame, snap: dict):
+    """把实时快照叠加为最后一根 K 线，让指标与现价同步。
+
+    返回 (df, 时点说明)。盘中日线源往往只到上一交易日，
+    这里以实时价补一根当日 bar，使现价/涨幅/均线/MACD 都反映最新行情。
+    """
+    price = float(snap.get("price") or 0)
+    if not price or df is None or len(df) == 0 or "close" not in df.columns:
+        return df, ""
+    today = pd.Timestamp(dt.date.today())
+    today_str = today.strftime("%Y-%m-%d")
+    qdate = str(snap.get("quote_date") or "")
+    qtime = str(snap.get("quote_time") or "")
+    # 快照日期不是今天 → 周末/节假日/尚未开盘，日线最后一根已是最近交易日
+    if qdate and qdate != today_str:
+        return df, f"最近收盘 {qdate}"
+    last = pd.Timestamp(df.index[-1]).normalize()
+    o = float(snap.get("open") or price)
+    h = max(float(snap.get("high") or price), price)
+    lo = min(float(snap.get("low") or price), price)
+    v = float(snap.get("volume") or 0)
+
+    df = df.copy()
+    if last == today:
+        df.iloc[-1, df.columns.get_loc("close")] = price
+        if "high" in df.columns:
+            df.iloc[-1, df.columns.get_loc("high")] = max(
+                float(df["high"].iloc[-1]), h)
+        if "low" in df.columns:
+            low_prev = float(df["low"].iloc[-1])
+            df.iloc[-1, df.columns.get_loc("low")] = (
+                min(low_prev, lo) if low_prev > 0 else lo)
+        if "volume" in df.columns and v > 0:
+            prev_v = float(df["volume"].iloc[-1])
+            if prev_v <= 0 or 0.02 <= v / prev_v <= 20:
+                df.iloc[-1, df.columns.get_loc("volume")] = v
+        hm = qtime[:5] if len(qtime) >= 5 else ""
+        return df, (f"盘中实时 {hm}" if hm else "盘中实时")
+
+    prev_v = float(df["volume"].iloc[-1]) if "volume" in df.columns else 0
+    row = {}
+    for c in df.columns:
+        row[c] = df[c].iloc[-1]
+    row["close"] = price
+    if "open" in df.columns:
+        row["open"] = o
+    if "high" in df.columns:
+        row["high"] = h
+    if "low" in df.columns:
+        row["low"] = lo
+    if "volume" in df.columns:
+        row["volume"] = (v if v > 0 and
+                         (prev_v <= 0 or 0.02 <= v / prev_v <= 20) else prev_v)
+    df.loc[today] = [row[c] for c in df.columns]
+    hm = qtime[:5] if len(qtime) >= 5 else ""
+    return df, (f"盘中实时 {hm}（已补当日行情）" if hm
+                else "盘中实时（已补当日行情）")
 
 
 def analyze_stock(code: str, name: Optional[str] = None,
@@ -291,7 +352,7 @@ def analyze_stock(code: str, name: Optional[str] = None,
 
     env 为 load_market_env() 的市场环境；不传时自动获取（批量分析应复用同一个）。
     """
-    from data_sources import fetch_daily
+    from data_sources import fetch_daily, fetch_realtime_snapshot
     end = dt.date.today().strftime("%Y%m%d")
     if start is None:
         start = (dt.date.today() - dt.timedelta(days=260)).strftime("%Y%m%d")
@@ -299,6 +360,15 @@ def analyze_stock(code: str, name: Optional[str] = None,
         df = fetch_daily(code, start, end)
         if df is None or len(df) < 30:
             return None
+        # 叠加实时快照：避免盘中仍显示上一交易日价格
+        chg, note = 0.0, ""
+        try:
+            snap = fetch_realtime_snapshot(code)
+            if snap:
+                df, note = _overlay_snapshot(df, snap)
+                chg = float(snap.get("change_pct") or 0)
+        except Exception:
+            pass
         ind = compute_indicators(df)
         raw, bull, bear = score_signals(ind)
         env = env or load_market_env()
@@ -312,7 +382,8 @@ def analyze_stock(code: str, name: Optional[str] = None,
             signal=grade, confidence=conf, score=total,
             bull=bull, bear=bear, indicators=ind,
             advice=_position_advice(grade, total),
-            score_raw=raw, env_bias=bias, market=env)
+            score_raw=raw, env_bias=bias, market=env,
+            change_pct=chg, quote_note=note)
     except Exception:
         return None
 
