@@ -537,15 +537,21 @@ def run_single_stock(code: str, months: int = 18, init_cash: float = 200_000,
 #  全市场组合模式
 # ============================================================
 def _load_pool(quotes: dict, pool_size: int,
-               max_price: Optional[float] = None) -> list:
+               max_price: Optional[float] = None,
+               exclude_star_bse: bool = False) -> list:
     """从全市场快照筛选可交易股票，按成交额/流通市值排序。
 
     max_price 不为空时剔除股价高于该值的标的（默认不过滤）。
+    exclude_star_bse=True 时剔除科创板（688/689）与北交所（8/4/9 开头）。
     """
     pool = []
     for q in quotes.values():
         code = str(q.get("code", ""))
         if not (len(code) == 6 and code.isdigit()):
+            continue
+        if exclude_star_bse and (
+                code.startswith(("688", "689")) or
+                code.startswith(("4", "8", "9"))):
             continue
         if q.get("is_st") or q.get("is_new"):
             continue
@@ -799,6 +805,7 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
                  fund_boost: bool = True,
                  max_position: float = MAX_POSITION,
                  max_price: Optional[float] = None,
+                 exclude_star_bse: bool = False,
                  progress: Optional[Callable[[str], None]] = None,
                  cancel: Optional[threading.Event] = None) -> dict:
     """全市场组合回测：多因子横截面选股 + 定期调仓 + 个股止损。"""
@@ -819,7 +826,7 @@ def run_universe(months: int = 18, init_cash: float = 200_000,
     log("正在获取全市场行情快照…")
     from data_sources import fetch_all_quotes
     quotes = fetch_all_quotes()
-    pool = _load_pool(quotes, pool_size, max_price)
+    pool = _load_pool(quotes, pool_size, max_price, exclude_star_bse)
     # 股票池上限可选 20/50/100/400，最小池为 20 只，阈值相应下调到 10
     min_pool = min(10, pool_size) if pool_size else 10
     if len(pool) < min_pool:

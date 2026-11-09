@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QProgressBar,
                                QComboBox, QStackedWidget, QTabWidget,
-                               QCompleter, QDialog, QCheckBox)
+                               QCompleter, QDialog, QCheckBox, QTableWidget)
 import pyqtgraph as pg
 
 from ui_common import (UP, DOWN, FLAT, CARD, TEXT, TEXT2, BORDER, WARN,
@@ -269,10 +269,16 @@ class BacktestPage(QWidget):
         self.price_cb = QCheckBox("剔除股价 > 60 元")
         self.price_cb.setChecked(False)
         self.price_cb.setToolTip("勾选后从股票池剔除高价股（波动与资金占用较大）")
+        self.star_cb = QCheckBox("排除科创板/北交所")
+        self.star_cb.setChecked(True)
+        self.star_cb.setToolTip(
+            "剔除科创板（688/689）与北交所（8/4/9 开头）个股；"
+            "资金体量不足、未开通相应权限时建议保持勾选")
         self.multi_hint = QLabel("")
         self.multi_hint.setStyleSheet(f"color:{TEXT2}; font-size:12px;")
         self.multi_hint.setWordWrap(True)
         mh.addWidget(self.price_cb)
+        mh.addWidget(self.star_cb)
         mh.addWidget(self.multi_hint, 1)
         mv.addLayout(mh)
         # 首次只刷新说明文案，持仓数保持截图默认的 5 只（用户改池容量时再自动联动）
@@ -393,9 +399,18 @@ class BacktestPage(QWidget):
             stretch_last=False)
         for i, w in enumerate([66, 96, 110, 100, 74, 66, 78]):
             self.attr_tbl.setColumnWidth(i, w)
+        self.pos_note = QLabel("运行回测后，这里会说明最近一次调仓/止损操作")
+        self.pos_note.setObjectName("Hint")
+        self.pos_note.setWordWrap(True)
+        pos_page = QWidget()
+        pv = QVBoxLayout(pos_page)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(6)
+        pv.addWidget(self.pos_note)
+        pv.addWidget(self.pos_tbl, 1)
         self.tabs.addTab(self.daily_tbl, "每日操作")
         self.tabs.addTab(self.trade_tbl, "交易明细")
-        self.tabs.addTab(self.pos_tbl, "持仓明细")
+        self.tabs.addTab(pos_page, "持仓明细")
         self.tabs.addTab(self.diag_tbl, "风险诊断")
         self.tabs.addTab(self.attr_tbl, "收益归因")
 
@@ -515,6 +530,68 @@ class BacktestPage(QWidget):
         self._popups.append(dlg)
         dlg.show()
 
+    def _render_pos_note(self, r):
+        """持仓明细页顶部：说明最新一次持仓操作（时点、买卖、止盈/止损、继续持有）。"""
+        def tag_name(t):
+            return f"{t.get('name') or t['code']}({t['code']})"
+
+        def hold_tag(rp):
+            if rp >= 20:
+                return f"<span style='color:{UP}'>浮盈 {rp:+.1f}%，可考虑止盈</span>"
+            if rp <= -8:
+                return f"<span style='color:{DOWN}'>浮亏 {rp:+.1f}%，接近止损线</span>"
+            return f"<span style='color:{TEXT2}'>浮动 {rp:+.1f}%，继续持有</span>"
+
+        trades = [t for t in (r.get("trades") or [])
+                  if t.get("side") in ("买入", "卖出")]
+        pos = r.get("positions") or []
+        lines = ["<b>操作时点</b>：调仓日收盘计算目标名单 → <b>次日开盘</b>成交；"
+                 "非调仓日只在收盘检查止损（成本回撤 &gt; 12%）→ 次日开盘卖出"]
+
+        if trades:
+            last = max(t.get("date", "") for t in trades)
+            buys = [t for t in trades
+                    if t.get("date") == last and t.get("side") == "买入"]
+            sells = [t for t in trades
+                     if t.get("date") == last and t.get("side") == "卖出"]
+            seg = [f"<b>最新操作</b>：{last} 开盘执行"]
+            if buys:
+                seg.append("买入 " + "、".join(tag_name(t) for t in buys[:8]))
+            if sells:
+                sl = [t for t in sells if "止损" in (t.get("reason") or "")]
+                tp = [t for t in sells
+                      if t not in sl and (t.get("pnl") or 0) > 0]
+                other = [t for t in sells if t not in sl and t not in tp]
+                chunks = []
+                if tp:
+                    chunks.append("止盈 " + "、".join(tag_name(t) for t in tp[:8]))
+                if sl:
+                    chunks.append("止损 " + "、".join(tag_name(t) for t in sl[:8]))
+                if other:
+                    chunks.append("换仓卖出 " + "、".join(
+                        tag_name(t) for t in other[:8]))
+                seg.append("卖出 " + "；".join(chunks))
+            if not buys and not sells:
+                seg.append("该交易日无成交（仅持仓观望）")
+            lines.append("；".join(seg) + "。")
+
+        if pos:
+            last_pd = max(p.get("date", "") for p in pos)
+            held = [p for p in pos if p.get("date") == last_pd]
+            if held:
+                items = []
+                for p in held[:8]:
+                    cost = float(p.get("cost") or 0)
+                    px = float(p.get("price") or 0)
+                    rp = (px / cost - 1) * 100 if cost else 0.0
+                    rp = round(rp, 1)
+                    items.append(f"{p.get('name') or p['code']}"
+                                 f"（{hold_tag(rp)}）")
+                more = f" 等 {len(held)} 只" if len(held) > 8 else ""
+                lines.append(f"<b>当前持仓</b>（{last_pd}）：" + "、".join(items)
+                             + more)
+        self.pos_note.setText("<br>".join(lines))
+
     def _render_curves(self, widget, dates, nav, bench, dd, pos, bench_label):
         """在指定图表控件中绘制净值、回撤、仓位三张图。"""
         widget.clear()
@@ -548,6 +625,8 @@ class BacktestPage(QWidget):
     def _popup_current_table(self):
         """把当前页签的表格复制到一个独立大窗口，便于查看长周期数据。"""
         src = self.tabs.currentWidget()
+        if src is not None and not isinstance(src, QTableWidget):
+            src = src.findChild(QTableWidget)
         idx = self.tabs.currentIndex()
         if src is None or src.rowCount() == 0:
             self.set_status("当前表还没有数据，请先运行回测")
@@ -700,7 +779,8 @@ class BacktestPage(QWidget):
                           exec_constraints=self.exec_cb.isChecked(),
                           fund_boost=self.fund_cb.isChecked(),
                           max_position=int(self.pool_pos.currentData()) / 100,
-                          max_price=60.0 if self.price_cb.isChecked() else None)
+                          max_price=60.0 if self.price_cb.isChecked() else None,
+                          exclude_star_bse=self.star_cb.isChecked())
             if mode == "pool":
                 def fn(progress=None, cancel=None):
                     r = backtest_service.run_universe(
@@ -721,6 +801,7 @@ class BacktestPage(QWidget):
         self.progress.setVisible(True)
         self.set_status(f"开始{desc}…")
         skeleton_table(self.daily_tbl, 5, "回测运行中…")
+        self.pos_note.setText("回测运行中…最近一次调仓/止损操作将在持仓明细页顶部说明")
         skeleton_table(self.trade_tbl, 5, "回测运行中…")
         skeleton_table(self.diag_tbl, 5, "回测运行中…")
         skeleton_table(self.attr_tbl, 5, "回测运行中…")
@@ -925,6 +1006,7 @@ class BacktestPage(QWidget):
                                     align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=pnl if pnl is not None else 0))
         pt.setSortingEnabled(True)
+        self._render_pos_note(r)
 
         # 风险诊断：风险分析 + 稳健性检验 + 交易成本
         es = r.get("exec_stats") or {}
