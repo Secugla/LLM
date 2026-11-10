@@ -590,18 +590,28 @@ class BacktestPage(QWidget):
         else:
             picks = preview.get("picks") or []
             if picks:
-                segs = []
+                segs, shows = [], []
                 for p in picks:
+                    if p.get("display_only"):
+                        shows.append(
+                            f"{p['name']}({p['code']}) {p['total']:.0f}分 "
+                            f"<span style='color:{TEXT2}'>["
+                            f"{p.get('board') or '科创/北交'}·仅展示不占席位]"
+                            f"</span>")
+                        continue
                     tag = ""
                     if p["code"] not in held:
                         tag = (f" <span style='color:{WARN}'>[新开仓预警]</span>")
                     segs.append(
                         f"{p['rank']}. {p['name']}({p['code']}) "
                         f"{p['total']:.0f}分{tag}")
-                lines.append(
-                    f"<b>预选个股</b>（按 {_fmt_d(preview.get('as_of') or '')} "
-                    f"最新数据，池 {preview.get('pool_selected', 0)} 只）："
-                    + "；".join(segs))
+                text = (f"<b>预选个股</b>（按 {_fmt_d(preview.get('as_of') or '')} "
+                        f"最新数据，池 {preview.get('pool_selected', 0)} 只，"
+                        f"占席 {preview.get('slots', len(segs))} 只）："
+                        + ("；".join(segs) if segs else "暂无满足分数的标的"))
+                if shows:
+                    text += "<br><b>其余板块</b>（不占开仓席位）：" + "；".join(shows)
+                lines.append(text)
             else:
                 lines.append("<b>预选个股</b>：最新行情下无满足分数门槛的标的")
 

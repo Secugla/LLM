@@ -1258,10 +1258,22 @@ def preview_next_picks(strategy_id: str = "high_flyer", top_n: int = 5,
     as_of = ""
     if data:
         as_of = max(h.index[-1] for h in data.values()).strftime("%Y-%m-%d")
-    # 与正式调仓相同：分数门槛 + 行业分散上限
+
+    def _restricted(code: str) -> str:
+        """科创板/北交所：可展示但不占开仓席位。"""
+        c = str(code)
+        if c.startswith(("688", "689")):
+            return "科创板"
+        if c.startswith(("4", "8", "9")):
+            return "北交所"
+        return ""
+
+    # 席位只给主板/创业板；行业上限也只统计占席标的
     chosen, industry_count = [], {}
     for p in picks:
         if p["total"] < min_score:
+            continue
+        if exclude_star_bse and _restricted(p["code"]):
             continue
         ind = p["industry"]
         if industry_count.get(ind, 0) >= industry_cap:
@@ -1270,14 +1282,37 @@ def preview_next_picks(strategy_id: str = "high_flyer", top_n: int = 5,
         industry_count[ind] = industry_count.get(ind, 0) + 1
         if len(chosen) >= top_n:
             break
+
+    # 科创板/北交所：单独补充打分，只作"仅展示"，不参与席位与行业上限
+    display = []
+    if exclude_star_bse:
+        all_pool = _load_pool(quotes, 0, max_price, exclude_star_bse=False)
+        star = [q for q in all_pool if _restricted(q.get("code"))][:12]
+        if star:
+            d2 = _fetch_pool_daily(star, start, end, progress,
+                                   threading.Event())
+            picks2, _ = _score_universe_at(end, d2, quotes, strat["weights"])
+            for p in picks2:
+                if p["total"] < min_score:
+                    continue
+                display.append({
+                    "rank": 0, "code": p["code"], "name": p["name"],
+                    "industry": p.get("industry", ""),
+                    "total": round(p["total"], 3),
+                    "display_only": True,
+                    "board": _restricted(p["code"])})
+                if len(display) >= 3:
+                    break
+
+    rows = [{"rank": i + 1, "code": p["code"], "name": p["name"],
+             "industry": p.get("industry", ""),
+             "total": round(p["total"], 3), "display_only": False,
+             "board": ""} for i, p in enumerate(chosen)]
     return {
         "as_of": as_of,
         "pool_selected": len(pool), "universe": universe_n,
-        "picks": [
-            {"rank": i + 1, "code": p["code"], "name": p["name"],
-             "industry": p.get("industry", ""), "total": round(p["total"], 3)}
-            for i, p in enumerate(chosen)
-        ],
+        "slots": len(rows),
+        "picks": rows + display,
     }
 
 
