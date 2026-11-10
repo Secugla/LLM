@@ -1244,7 +1244,9 @@ def preview_next_picks(strategy_id: str = "high_flyer", top_n: int = 5,
     strat = SL.get_strategy(strategy_id)
     industry_cap = int(strat["params"].get("industry_cap", 3))
     min_score = float(strat["params"].get("min_score", 40))
-    quotes = fetch_all_quotes()
+    # 只预览、不写缓存：避免刷新预选把行情快照覆盖成盘中数据，
+    # 导致下一次回测的股票池/成交额与上次不同、收益曲线跳变
+    quotes = fetch_all_quotes(save_cache=False)
     if not quotes:
         return {"picks": [], "as_of": "", "error": "实时行情不可用"}
     pool = _load_pool(quotes, pool_size, max_price, exclude_star_bse)

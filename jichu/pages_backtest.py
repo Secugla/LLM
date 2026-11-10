@@ -44,6 +44,12 @@ def _fmt_d(s: str) -> str:
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
     return f"{m.group(2)}/{m.group(3)}/{m.group(1)}" if m else s
 
+
+def _sort_d(s) -> int:
+    """日期排序值：显示成 MM/DD/YYYY 后必须按 YYYYMMDD 排序，否则跨年乱序。"""
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", str(s or ""))
+    return int(m.group(1) + m.group(2) + m.group(3)) if m else 0
+
 # 股票池上限 → 选股方式说明（池越小越偏向龙头/大票，越大越接近全市场采样）
 POOL_MODE = {
     20: ("龙头精选池",
@@ -1066,7 +1072,8 @@ class BacktestPage(QWidget):
             rr = t.rowCount()
             t.insertRow(rr)
             t.setItem(rr, 0, cell(_fmt_d(d["date"]), TEXT2,
-                                   align=Qt.AlignCenter))
+                                   align=Qt.AlignCenter,
+                                   sort_value=_sort_d(d["date"])))
             ac = d.get("action", "")
             if "买入" in ac and "卖出" in ac:
                 ac_c = WARN
@@ -1110,7 +1117,8 @@ class BacktestPage(QWidget):
             side = d.get("side", "")
             sc = UP if side == "买入" else (DOWN if side == "卖出" else WARN)
             tt.setItem(rr, 0, cell(_fmt_d(d.get("date", "")), TEXT2,
-                                    align=Qt.AlignCenter))
+                                    align=Qt.AlignCenter,
+                                    sort_value=_sort_d(d.get("date"))))
             tt.setItem(rr, 1, cell(d.get("code", ""), align=Qt.AlignCenter))
             tt.setItem(rr, 2, cell(d.get("name", ""), align=Qt.AlignCenter))
             tt.setItem(rr, 3, cell(side, sc, bold=True, align=Qt.AlignCenter))
@@ -1128,7 +1136,8 @@ class BacktestPage(QWidget):
                                     align=Qt.AlignRight | Qt.AlignVCenter,
                                     sort_value=pct if pct is not None else -1))
             tt.setItem(rr, 8, cell(_fmt_d(d.get("buy_date") or "—"),
-                                    align=Qt.AlignCenter))
+                                    align=Qt.AlignCenter,
+                                    sort_value=_sort_d(d.get("buy_date"))))
             bp = d.get("buy_price")
             tt.setItem(rr, 9, cell("—" if bp is None else f"{bp:.2f}",
                                     align=Qt.AlignRight | Qt.AlignVCenter,
@@ -1150,7 +1159,8 @@ class BacktestPage(QWidget):
             rr = pt.rowCount()
             pt.insertRow(rr)
             pt.setItem(rr, 0, cell(_fmt_d(d.get("date", "")), TEXT2,
-                                    align=Qt.AlignCenter))
+                                    align=Qt.AlignCenter,
+                                    sort_value=_sort_d(d.get("date"))))
             pt.setItem(rr, 1, cell(d.get("code", ""), align=Qt.AlignCenter))
             pt.setItem(rr, 2, cell(d.get("name", ""), align=Qt.AlignCenter))
             pt.setItem(rr, 3, cell(f"{d.get('shares', 0):,}",

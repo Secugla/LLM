@@ -633,7 +633,7 @@ def _fallback_code_list() -> list:
         return []
 
 
-def fetch_all_quotes(force: bool = False) -> dict:
+def fetch_all_quotes(force: bool = False, save_cache: bool = True) -> dict:
     """
     全市场实时行情（统一字段）：
       code,name,price,change_pct,amount(元),volume,turnover(%),
@@ -665,7 +665,8 @@ def fetch_all_quotes(force: bool = False) -> dict:
             quotes = {}
 
     if quotes:
-        cache_save(key, quotes)
+        if save_cache:
+            cache_save(key, quotes)
         return quotes
 
     old = cache_load(key, 0)
