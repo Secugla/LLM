@@ -31,12 +31,12 @@ DOWN = "#1BA784"        # 跌（绿）
 FLAT = "#8A9099"
 BG = "#F3F5F9"          # 窗口背景
 CARD = "#FFFFFF"
-TOPBAR = "#1E2634"      # 顶部/导航深色
-NAV_BG = "#1B2230"
+TOPBAR = "#FFFFFF"      # 顶部/导航浅色（亮色主题）
+NAV_BG = "#FFFFFF"
 ACCENT = "#C8161D"      # 同花顺红
 ACCENT_LIGHT = "#E5403B"
 TEXT = "#202634"
-TEXT2 = "#8B93A2"
+TEXT2 = "#66707F"       # 次级文字：加深，保证浅色背景上可读
 BORDER = "#E5E9F1"
 ROW_ALT = "#F8FAFD"
 SELECT = "#FDEDED"
@@ -49,9 +49,9 @@ WARN = "#D98A09"
 BG_GRAD = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
            "stop:0 #F5F7FA, stop:1 #E8EDF4)")
 TOPBAR_GRAD = ("qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-               "stop:0 #1E2634, stop:1 #2C3A52)")
+               "stop:0 #FFFFFF, stop:1 #F4F7FB)")
 NAV_GRAD = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
-            "stop:0 #222B3A, stop:1 #191F2B)")
+            "stop:0 #FFFFFF, stop:1 #F5F8FC)")
 PRIMARY_GRAD = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
                 "stop:0 #E54540, stop:1 #C01218)")
 PRIMARY_HOVER_GRAD = ("qlineargradient(x1:0, y1:0, x2:0, y2:1, "
@@ -91,9 +91,9 @@ def global_qss() -> str:
     QLabel#Hint {{ color: {TEXT2}; font-size: 12px; }}
     QLabel#Pill {{ background: #EEF2F8; color: #5A6473; border-radius: 10px;
         padding: 3px 10px; font-size: 12px; }}
-    QLabel#H1 {{ color: #FFFFFF; font-size: 16px; font-weight: bold;
+    QLabel#H1 {{ color: {TEXT}; font-size: 16px; font-weight: bold;
         letter-spacing: 0.5px; }}
-    QLabel#H2 {{ color: #B9C2D0; font-size: 11px; }}
+    QLabel#H2 {{ color: {TEXT2}; font-size: 11px; }}
 
     /* ---- 按钮 ---- */
     QPushButton {{
@@ -125,12 +125,12 @@ def global_qss() -> str:
     QPushButton#GhostBtn:hover {{ background: #FFEAE9;
         border-color: #EAB3B0; }}
     QPushButton#Ghost {{
-        background: rgba(255,255,255,0.08); color: #D5DBE5;
-        border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
+        background: #F5F7FA; color: #4A5568;
+        border: 1px solid #E2E8F0; border-radius: 8px;
         padding: 6px 14px;
     }}
-    QPushButton#Ghost:hover {{ background: rgba(255,255,255,0.16);
-        color: #FFFFFF; }}
+    QPushButton#Ghost:hover {{ background: #EAEFF6;
+        color: {ACCENT}; border-color: #D5DDE8; }}
     QPushButton#Tab {{ text-align: left; padding: 8px 14px;
         border-radius: 8px; }}
     QPushButton#Tab:checked {{
@@ -237,8 +237,8 @@ def global_qss() -> str:
 
     /* ---- 状态栏 ---- */
     QStatusBar {{
-        background: #2A3546; color: #C9D2DE; font-size: 12px;
-        border-top: 1px solid #35425A;
+        background: #FFFFFF; color: #4A5568; font-size: 12px;
+        border-top: 1px solid #E5E9F1;
     }}
     QStatusBar::item {{ border: none; }}
 

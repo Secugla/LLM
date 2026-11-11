@@ -50,14 +50,14 @@ class NavButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(f"""
         QPushButton#Nav {{
-            color: #B9C2D0; background: transparent; border: none;
+            color: #4A5568; background: transparent; border: none;
             border-left: 3px solid transparent; text-align: left;
             padding: 4px 14px; font-size: 13px; border-radius: 8px;
         }}
-        QPushButton#Nav:hover {{ background: rgba(255,255,255,0.06);
-            color: #FFFFFF; }}
+        QPushButton#Nav:hover {{ background: #EFF3F9;
+            color: {TEXT}; }}
         QPushButton#Nav:checked {{
-            background: rgba(208,29,36,0.15); color: #FFFFFF;
+            background: #FDECEA; color: {ACCENT};
             border-left: 3px solid {ACCENT}; font-weight: bold;
         }}
         """)
@@ -92,8 +92,8 @@ class MainWindow(QMainWindow):
         nav.setFixedWidth(212)
         nav.setStyleSheet(
             "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "stop:0 #1D2533, stop:1 #161C27);"
-            "border-right: 1px solid #2A3342;")
+            "stop:0 #FFFFFF, stop:1 #F5F8FC);"
+            "border-right: 1px solid #E5E9F1;")
         nl = QVBoxLayout(nav)
         nl.setContentsMargins(8, 0, 8, 12)
         nl.setSpacing(2)
@@ -104,13 +104,13 @@ class MainWindow(QMainWindow):
         bt.setContentsMargins(12, 16, 10, 8)
         bt.setSpacing(2)
         t1 = QLabel("量化选股系统")
-        t1.setStyleSheet("color:#FFFFFF; font-size:17px; font-weight:bold;"
+        t1.setStyleSheet(f"color:{TEXT}; font-size:17px; font-weight:bold;"
                          "letter-spacing:0.5px;")
         line = QFrame()
         line.setFixedSize(34, 3)
         line.setStyleSheet(f"background:{ACCENT}; border-radius:1px;")
         t2 = QLabel("A-SHARE QUANT TERMINAL")
-        t2.setStyleSheet("color:#7C8798; font-size:10px; letter-spacing:1.2px;")
+        t2.setStyleSheet("color:#66707F; font-size:10px; letter-spacing:1.2px;")
         bt.addWidget(t1)
         bt.addSpacing(4)
         bt.addWidget(line)
@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         nl.addWidget(brand)
 
         sec = QLabel("功能导航 · NAVIGATION")
-        sec.setStyleSheet("color:#6C7686; font-size:10px;"
+        sec.setStyleSheet("color:#66707F; font-size:10px;"
                           "letter-spacing:1px; padding:10px 8px 6px;")
         nl.addWidget(sec)
 
@@ -145,7 +145,7 @@ class MainWindow(QMainWindow):
 
         foot = QLabel("数据源：东财 · 同花顺 · 财联社 · 新浪 · 腾讯\n"
                       "红涨绿跌 · 仅供研究，不构成投资建议")
-        foot.setStyleSheet("color:#6C7686; font-size:10px; padding: 10px 16px;")
+        foot.setStyleSheet("color:#66707F; font-size:10px; padding: 10px 16px;")
         foot.setWordWrap(True)
         nl.addWidget(foot)
         root.addWidget(nav)
@@ -160,8 +160,8 @@ class MainWindow(QMainWindow):
         top.setFixedHeight(64)
         top.setStyleSheet(
             "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #1E2634, stop:1 #2C3A52);"
-            "border-bottom: 1px solid #35425A;")
+            "stop:0 #FFFFFF, stop:1 #F4F7FB);"
+            "border-bottom: 1px solid #E5E9F1;")
         tl = QHBoxLayout(top)
         tl.setContentsMargins(20, 10, 20, 10)
         tl.setSpacing(10)
@@ -172,7 +172,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("H1")
         self.page_title = title
         self.market_lbl = QLabel("正在加载市场数据…")
-        self.market_lbl.setStyleSheet("color:#C7CCD4; font-size:12px;")
+        self.market_lbl.setStyleSheet("color:#5A6473; font-size:12px;")
         self.src_lbl = QLabel("")
         self.src_lbl.setObjectName("Pill")
         self.btn_refresh = QPushButton("刷新信息")
@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
         sb.setSizeGripEnabled(True)
         self.status_lbl = QLabel("准备就绪")
         self.clock_lbl = QLabel("")
-        self.clock_lbl.setStyleSheet("color:#9AA4B2;")
+        self.clock_lbl.setStyleSheet("color:#66707F;")
         self.live_lbl = QLabel("")
         self.live_lbl.setStyleSheet("color:#2E6FD6;")
         self.live_lbl.setToolTip("全局行情被动刷新：交易时段每 3 秒更新各页现价")
