@@ -19,12 +19,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QFrame, QSplitter, QTextBrowser,
-                               QComboBox, QProgressBar, QFileDialog)
+                               QComboBox, QProgressBar, QFileDialog, QCheckBox)
 
 from ui_common import (UP, DOWN, FLAT, WARN, TEXT2, Worker, make_table, cell,
                        pct_color, skeleton_table, export_table_csv)
 import market_info
 import recommender
+import high_flyer_recommender
 
 BATCHES = [("morning", "早盘批 · 9:27"), ("noon", "午盘批 · 12:57")]
 
@@ -46,7 +47,9 @@ class RecommendPage(QWidget):
         self.provider = snapshot_provider
         self.on_snapshot = on_snapshot
         self.batch = "morning"
+        self.model = "default"
         self.results = {"morning": None, "noon": None}
+        self.hf_results = {"morning": None, "noon": None}
         self._workers = []
         self._busy = False
         self._row_picks = {}
@@ -54,27 +57,35 @@ class RecommendPage(QWidget):
         self._load_cached()
 
     # ---------------- 缓存 ----------------
-    def _cache_path(self, slot: str) -> str:
+    def _current_results(self):
+        return self.hf_results if self.model == "high_flyer" else self.results
+
+    def _cache_path(self, slot: str, model: str = "default") -> str:
+        prefix = "picks_high_flyer" if model == "high_flyer" else "picks"
         return os.path.join(
             market_info.CACHE_DIR,
-            f"picks_{slot}_{dt.date.today():%Y%m%d}.json")
+            f"{prefix}_{slot}_{dt.date.today():%Y%m%d}.json")
 
     def _load_cached(self):
-        for slot, _ in BATCHES:
-            p = self._cache_path(slot)
-            if os.path.exists(p):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        self.results[slot] = json.load(f)
-                except Exception:
-                    self.results[slot] = None
+        for model, target in (("default", self.results),
+                              ("high_flyer", self.hf_results)):
+            for slot, _ in BATCHES:
+                p = self._cache_path(slot, model)
+                if os.path.exists(p):
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            target[slot] = json.load(f)
+                    except Exception:
+                        target[slot] = None
         self._render()
 
     def _save_cached(self, slot: str, res: dict):
-        tmp = self._cache_path(slot) + ".tmp"
+        model = res.get("model", "default")
+        path = self._cache_path(slot, model)
+        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(res, f, ensure_ascii=False)
-        os.replace(tmp, self._cache_path(slot))
+        os.replace(tmp, path)
 
     # ---------------- UI ----------------
     def _build(self):
@@ -102,6 +113,12 @@ class RecommendPage(QWidget):
         divider.setFixedHeight(24)
         divider.setStyleSheet("background:#E3E6EA;")
         bl.addWidget(divider)
+        self.hf_cb = QCheckBox("幻方量化")
+        self.hf_cb.setToolTip(
+            "勾选后使用回测同款横截面多因子评分荐股；"
+            "公开方法论近似，非幻方官方模型")
+        self.hf_cb.stateChanged.connect(self._on_model_changed)
+        bl.addWidget(self.hf_cb)
         self.btn = QPushButton("生成多因子荐股")
         self.btn.setObjectName("Primary")
         self.btn.clicked.connect(self.generate)
@@ -198,6 +215,12 @@ class RecommendPage(QWidget):
         skeleton_table(self.pick_tbl, 8, "等待生成多因子名单…")
         skeleton_table(self.ladder_tbl, 6, "等待涨停梯队…")
 
+    def _on_model_changed(self, state: int):
+        self.model = "high_flyer" if state else "default"
+        self.btn.setText("生成幻方荐股" if self.model == "high_flyer"
+                         else "生成多因子荐股")
+        self._render()
+
     def _on_batch_changed(self, idx: int):
         slot = self.batch_cb.itemData(idx)
         if slot and slot != self.batch:
@@ -217,19 +240,24 @@ class RecommendPage(QWidget):
         self._run(slot, manual=False)
 
     def has_result_today(self, slot: str) -> bool:
-        """当天该批次是否已有结果（自动任务据此避免重复抓取）。"""
-        return self.results.get(slot) is not None
+        """当天该批次当前模式是否已有结果（自动任务据此避免重复抓取）。"""
+        return self._current_results().get(slot) is not None
 
     def _run(self, slot: str, manual: bool):
         if self._busy:
             return
         self._busy = True
+        model = "high_flyer" if self.hf_cb.isChecked() else "default"
         self.btn.setEnabled(False)
+        self.hf_cb.setEnabled(False)
         self.progress.setVisible(True)
         kind = "手动" if manual else "自动"
         label = dict(BATCHES)[slot]
-        self.set_status(f"正在{kind}生成{label}多因子荐股…")
-        skeleton_table(self.pick_tbl, 8, "正在多因子打分…")
+        mode_name = "幻方量化荐股" if model == "high_flyer" else "多因子荐股"
+        self.set_status(f"正在{kind}生成{label}{mode_name}…")
+        skeleton_table(self.pick_tbl, 8,
+                       "正在幻方横截面打分…" if model == "high_flyer"
+                       else "正在多因子打分…")
 
         def task(p):
             snap = self.provider()
@@ -242,11 +270,17 @@ class RecommendPage(QWidget):
                 p("信息尚未加载，先抓取最新消息…")
                 snap = market_info.refresh_all(progress=p)
                 self.on_snapshot(snap)
-            if slot == "noon":
-                p("正在按「上午强度 + 板块排名 + 半日量能」重排午后推荐…")
+            if model == "high_flyer":
+                p("幻方模式：按最新行情与日线进行全市场横截面多因子排名…")
+                res = high_flyer_recommender.recommend(
+                    snap, session=slot, progress=p)
             else:
-                p("正在结合当日信息与题材打分（趋势/量价/轮动/龙头/题材/风险）…")
-            res = recommender.recommend(snap, progress=p, session=slot)
+                if slot == "noon":
+                    p("正在按「上午强度 + 板块排名 + 半日量能」重排午后推荐…")
+                else:
+                    p("正在结合当日信息与题材打分（趋势/量价/轮动/龙头/题材/风险）…")
+                res = recommender.recommend(snap, progress=p, session=slot)
+            res["model"] = model
             res["slot"] = slot
             res["manual"] = manual
             res["generated_at"] = dt.datetime.now().strftime(
@@ -264,6 +298,7 @@ class RecommendPage(QWidget):
     def _on_finished(self):
         self._busy = False
         self.btn.setEnabled(True)
+        self.hf_cb.setEnabled(True)
         self.progress.setVisible(False)
         self._workers = [x for x in self._workers if x.isRunning()]
 
@@ -273,12 +308,25 @@ class RecommendPage(QWidget):
 
     def _on_done(self, res):
         slot = res.get("slot", self.batch)
-        self.results[slot] = res
+        model = res.get("model", "default")
+        target = self.hf_results if model == "high_flyer" else self.results
+        target[slot] = res
         self.batch = slot
+        self.model = model
+        self.hf_cb.blockSignals(True)
+        self.hf_cb.setChecked(model == "high_flyer")
+        self.hf_cb.blockSignals(False)
+        self.btn.setText("生成幻方荐股" if model == "high_flyer"
+                         else "生成多因子荐股")
         self._save_cached(slot, res)
         self._render()
+        count = res.get("slots", len(res.get("picks", []))) \
+            if model == "high_flyer" else len(res.get("picks", []))
+        extra = f"，仅展示 {res.get('display_count', 0)} 只" \
+            if model == "high_flyer" and res.get("display_count") else ""
         self.set_status(
-            f"{dict(BATCHES)[slot]}完成：推荐 {len(res.get('picks', []))} 只，"
+            f"{dict(BATCHES)[slot]}{'幻方' if model == 'high_flyer' else ''}"
+            f"完成：推荐 {count} 只{extra}，"
             f"涨停梯队 {len(res.get('ladder', []))} 只，"
             f"耗时 {res.get('elapsed', 0)}s")
 
@@ -288,15 +336,20 @@ class RecommendPage(QWidget):
         self.batch_cb.blockSignals(True)
         self.batch_cb.setCurrentIndex(idx)
         self.batch_cb.blockSignals(False)
-        res = self.results[self.batch]
+        res = self._current_results()[self.batch]
         self._row_picks = {}
         if res is None:
+            is_hf = self.model == "high_flyer"
             self.date_lbl.setText("本批次尚未生成")
             self.degraded_lbl.setText("")
             self.note_lbl.setText(
+                "幻方横截面多因子荐股；公开方法论近似，非幻方官方模型"
+                if is_hf else
                 "开盘前 T-3 分钟生成；非交易时段使用最近收盘数据并自动降级")
             self.reason_box.clear()
-            skeleton_table(self.pick_tbl, 8, "点击“生成多因子荐股”开始")
+            skeleton_table(self.pick_tbl, 8,
+                           "点击“生成幻方荐股”开始" if is_hf
+                           else "点击“生成多因子荐股”开始")
             skeleton_table(self.ladder_tbl, 6, "等待涨停梯队…")
             return
 
@@ -309,6 +362,9 @@ class RecommendPage(QWidget):
         notes = res.get("data_notes") or []
         extra = (f" · 全市场 {res.get('universe', 0)} 只 / "
                  f"候选 {res.get('candidates', 0)} 只")
+        if res.get("model") == "high_flyer":
+            extra += (f" · 正式 {res.get('slots', 0)} 只 / "
+                      f"仅展示 {res.get('display_count', 0)} 只")
         brief = res.get("session_brief") or ""
         if brief:
             self.note_lbl.setText(brief + extra)
@@ -319,6 +375,7 @@ class RecommendPage(QWidget):
 
         self.pick_tbl.setSortingEnabled(False)
         self.pick_tbl.setRowCount(0)
+        factors_meta = res.get("factors_meta") or recommender.FACTOR_META
         for p in res.get("picks", []):
             r = self.pick_tbl.rowCount()
             self.pick_tbl.insertRow(r)
@@ -330,7 +387,10 @@ class RecommendPage(QWidget):
             c0.setData(Qt.UserRole, p)
             self.pick_tbl.setItem(r, 1, cell(
                 p.get("code", ""), align=Qt.AlignCenter))
-            self.pick_tbl.setItem(r, 2, cell(p.get("name", ""), bold=True))
+            name_text = p.get("name", "")
+            if p.get("display_only"):
+                name_text += f"（{p.get('board', '')}仅展示）"
+            self.pick_tbl.setItem(r, 2, cell(name_text, bold=True))
             self.pick_tbl.setItem(r, 3, cell(p.get("industry", ""), TEXT2))
             self.pick_tbl.setItem(r, 4, cell(
                 f"{p.get('price', 0):.2f}", align=Qt.AlignCenter,
@@ -348,7 +408,7 @@ class RecommendPage(QWidget):
             fs = p.get("factor_scores") or {}
             for j, key in enumerate(FACTOR_KEYS):
                 v = float(fs.get(key, 0) or 0)
-                meta = recommender.FACTOR_META.get(key, {})
+                meta = factors_meta.get(key, {})
                 mx = meta.get("max", 1)
                 ratio = v / mx if mx else 0
                 col = UP if ratio >= 0.7 else (WARN if ratio >= 0.4 else TEXT2)
@@ -430,7 +490,8 @@ class RecommendPage(QWidget):
             return
         name = p.get("name", "")
         html = ""
-        brief = (self.results.get(self.batch) or {}).get("session_brief") or ""
+        brief = (self._current_results().get(self.batch) or {}).get(
+            "session_brief") or ""
         if brief:
             html += (f"<span style='color:{TEXT2}'>{brief}</span>"
                      f"<hr style='border:none;border-top:1px solid #E6E8EB'>")
@@ -486,13 +547,14 @@ class RecommendPage(QWidget):
 
     # ---------------- 导出 ----------------
     def _export(self):
-        res = self.results.get(self.batch)
+        res = self._current_results().get(self.batch)
         if not res or not res.get("picks"):
             self.set_status("当前批次暂无结果可导出")
             return
+        mode = "幻方荐股" if self.model == "high_flyer" else "多因子荐股"
         default = os.path.join(
             os.path.expanduser("~"), "Desktop",
-            f"多因子荐股_{self.batch}_{dt.date.today():%Y%m%d}.csv")
+            f"{mode}_{self.batch}_{dt.date.today():%Y%m%d}.csv")
         path, _ = QFileDialog.getSaveFileName(
             self, "导出荐股结果", default, "CSV 文件 (*.csv)")
         if not path:
